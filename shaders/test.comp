@@ -1,0 +1,96 @@
+#version 450
+layout (local_size_x = 256) in;
+
+struct Object {
+    mat4 model;
+    uint texture;
+    uint mesh;
+    uint batch;
+    uint redirect;
+};
+
+struct IndirectCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
+
+    uint batchCount;
+
+    uint padding0;
+    uint padding1;
+};
+
+struct Mesh {
+    vec3 bounds_max;
+    uint firstIndex;
+    vec3 bounds_min;
+    uint indexCount;
+    int vertexOffset;
+};
+
+layout(std140, set = 3, binding = 0) readonly buffer MeshesBuffer {
+    Mesh meshes[];
+} meshesBuffer;
+
+layout(set = 2, binding = 0) uniform GlobalUniform {
+  mat4 view;
+  mat4 proj;
+  mat4 viewProj;
+  float time;
+  uint renderablesCount;
+} globalUniform;
+
+layout(std140, set = 0, binding = 0) buffer ObjectBuffer {
+	Object objects[];
+} objectBuffer;
+
+layout(std140, set = 1, binding = 0) buffer IndirectBuffer {
+	IndirectCommand commands[];
+} indirectBuffer;
+
+void main() {
+	uint gID = gl_GlobalInvocationID.x;
+    if (gID >= globalUniform.renderablesCount) return;
+    Object object = objectBuffer.objects[gID];
+    Mesh mesh = meshesBuffer.meshes[object.mesh];
+    vec3 corners[8] = {
+        vec3(mesh.bounds_min.x, mesh.bounds_min.y, mesh.bounds_min.z),
+        vec3(mesh.bounds_min.x, mesh.bounds_min.y, mesh.bounds_max.z),
+        vec3(mesh.bounds_min.x, mesh.bounds_max.y, mesh.bounds_min.z),
+        vec3(mesh.bounds_min.x, mesh.bounds_max.y, mesh.bounds_max.z),
+        vec3(mesh.bounds_max.x, mesh.bounds_min.y, mesh.bounds_min.z),
+        vec3(mesh.bounds_max.x, mesh.bounds_min.y, mesh.bounds_max.z),
+        vec3(mesh.bounds_max.x, mesh.bounds_max.y, mesh.bounds_min.z),
+        vec3(mesh.bounds_max.x, mesh.bounds_max.y, mesh.bounds_max.z),
+    };
+    bool visible = false;
+    for (int i = 0; i < 8 && !visible; i++) {
+        vec4 screenPos = globalUniform.viewProj * object.model * vec4(corners[i], 1.0);
+        visible = visible 
+            || -screenPos.w <= screenPos.x && screenPos.x <= screenPos.w
+            && -screenPos.w <= screenPos.y
+            && screenPos.y <= screenPos.w
+            && 0.0 <= screenPos.z
+            && screenPos.z <= screenPos.w;
+    }
+    float time = globalUniform.time;
+    
+    uint indirectDraw = object.batch >> 16;
+    uint batch = object.batch & 0x0000FFFF;
+    //indirectBuffer.commands[indirectDraw].batchCount = 0xFFFFFFFF;
+    if (visible) {
+        uint firstInstance = objectBuffer.objects[batch].texture >> 16;
+        uint objectIndex = atomicAdd(indirectBuffer.commands[batch].instanceCount, 1);
+        if (objectIndex == 0) {
+            atomicAdd(indirectBuffer.commands[indirectDraw].batchCount, 1);
+            indirectBuffer.commands[batch].firstInstance = firstInstance;
+            indirectBuffer.commands[batch].firstIndex = mesh.firstIndex;
+            indirectBuffer.commands[batch].indexCount = mesh.indexCount;
+            indirectBuffer.commands[batch].vertexOffset = mesh.vertexOffset;
+        }
+        objectBuffer.objects[firstInstance + objectIndex].redirect = gID;
+        //objectBuffer.objects[gID].redirect = gID;
+    }
+}

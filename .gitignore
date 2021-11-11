@@ -1,0 +1,6 @@
+Cargo.lock
+shaders/*.spv
+.idea/
+.vscode/
+assets/
+.idea/

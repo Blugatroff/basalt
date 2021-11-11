@@ -1,0 +1,37 @@
+#version 450
+#extension GL_EXT_nonuniform_qualifier : enable
+layout (location = 0) in vec3 vPosition;
+layout (location = 1) in vec3 vNormal;
+layout (location = 2) in vec2 vUv;
+layout (location = 3) in flat uint texId;
+
+layout (location = 0) out vec4 outFragColor;
+
+layout(set = 0, binding = 0) uniform GlobalUniform {
+  mat4 view;
+  mat4 proj;
+  mat4 viewProj;
+  float time;
+} globalUniform;
+
+layout(set = 0, binding = 1) uniform SceneParams {
+  vec4 fogColor;
+  vec4 fogDistances;
+  vec4 ambientColor;
+  vec4 sunlightDirection;
+  vec4 sunlightColor;
+} sceneParams;
+
+layout(set = 2, binding = 0) uniform sampler2D textures[];
+
+void main() {
+  vec3 lightDir = vec3(0, 1, 0);
+  float diffuse = dot(vNormal, lightDir) * 0.5 + 0.5;
+  diffuse = diffuse * 0.5 + 0.5;
+  vec4 color = texture(textures[texId], vUv);
+  //color = vec4(1.0);
+  if (color.w == 0.0) {
+    discard;
+  }
+  outFragColor = vec4(color.xyz * diffuse, 1.0);
+}

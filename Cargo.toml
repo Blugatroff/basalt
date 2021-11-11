@@ -1,0 +1,19 @@
+[package]
+name = "basalt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+erupt = "0.19"
+vk-mem-erupt = "0.2.3"
+cgmath = "*"
+tobj = "*"
+structopt = "*"
+first-person-camera = { git = "https://github.com/Blugatroff/first-person-camera.git" }
+image = "*"
+spirv-reflect = "*"
+egui = "*"
+
+[dependencies.sdl2]
+version = "*"
+features = ["raw-window-handle"]
