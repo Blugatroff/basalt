@@ -224,7 +224,7 @@ impl EruptEgui {
         }
     }
     fn upload_font_texture(&mut self, image_loader: &ImageLoader, texture: Arc<egui::Texture>) {
-        let data = texture
+        /* let data = texture
             .pixels
             .iter()
             .flat_map(|r| [*r; 4])
@@ -233,7 +233,7 @@ impl EruptEgui {
         let height = texture.height as u32;
         let image = AllocatedImage::load(image_loader, &data, width, height);
         let texture = Texture::new(image_loader.device.clone(), image);
-        dbg!("LOADED FONT TEXTURE");
+        dbg!("LOADED FONT TEXTURE"); */
     }
     pub fn run(
         &mut self,
@@ -272,7 +272,8 @@ impl EruptEgui {
         vertex_buffer: &mut SubAllocatedBuffer,
         meshes: &Meshes,
     ) -> Vec<Renderable> {
-        let meshes: Vec<Renderable> = clipped_meshes
+        return Vec::new();
+        /* let meshes: Vec<Renderable> = clipped_meshes
             .into_iter()
             .map(|mesh| {
                 let egui::ClippedMesh(rect, mesh) = mesh;
@@ -299,7 +300,7 @@ impl EruptEgui {
                 }
             })
             .collect();
-        meshes
+        meshes */
     }
     fn update_modifiers(&mut self, keymod: &sdl2::keyboard::Mod) -> &egui::Modifiers {
         self.raw_input.modifiers = egui::Modifiers {

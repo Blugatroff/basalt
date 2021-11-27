@@ -370,7 +370,9 @@ pub fn create_command_buffers(
         .command_buffer_count(number)
         .level(vk::CommandBufferLevel::PRIMARY);
 
-    unsafe { device.allocate_command_buffers(&command_buffer_allocate_info) }.unwrap()
+    unsafe { device.allocate_command_buffers(&command_buffer_allocate_info) }
+        .unwrap()
+        .to_vec()
 }
 pub fn create_render_pass(device: Arc<Device>, format: vk::SurfaceFormatKHR) -> RenderPass {
     let color_attachment = vk::AttachmentDescriptionBuilder::new()
@@ -450,7 +452,9 @@ pub fn create_swapchain(
         });
 
     let swapchain = Swapchain::new(device.clone(), &swapchain_info);
-    let swapchain_images = unsafe { device.get_swapchain_images_khr(*swapchain, None) }.unwrap();
+    let swapchain_images = unsafe { device.get_swapchain_images_khr(*swapchain, None) }
+        .unwrap()
+        .to_vec();
 
     // https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Image_views
     let swapchain_image_views: Vec<_> = swapchain_images
@@ -591,7 +595,7 @@ pub fn create_physical_device(
 
             let present_modes = instance
                 .get_physical_device_surface_present_modes_khr(physical_device, surface, None)
-                .unwrap();
+                .unwrap().to_vec();
             let present_mode = *present_modes
                 .iter()
                 .find(|present_mode| present_mode == &&preferred_present_mode)

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-erupt = "0.19"
+erupt = "0.20"
 vk-mem-erupt = "0.2.3"
 cgmath = "*"
 tobj = "*"

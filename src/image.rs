@@ -143,8 +143,8 @@ impl AllocatedImage {
                     .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
                 image_loader.device.cmd_pipeline_barrier(
                     cmd,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
+                    Some(vk::PipelineStageFlags::TOP_OF_PIPE),
+                    Some(vk::PipelineStageFlags::TRANSFER),
                     None,
                     &[],
                     &[],
@@ -177,8 +177,8 @@ impl AllocatedImage {
 
                 image_loader.device.cmd_pipeline_barrier(
                     cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    Some(vk::PipelineStageFlags::TRANSFER),
+                    Some(vk::PipelineStageFlags::COMPUTE_SHADER),
                     None,
                     &[],
                     &[],

@@ -240,6 +240,7 @@ pub struct App {
     frame_number: u64,
     vertex_buffer: SubAllocatedBuffer,
     image_loader: ImageLoader,
+    #[allow(dead_code)]
     transfer_context: Arc<TransferContext>,
     last_time: std::time::Instant,
     physical_device_properties: vk::PhysicalDeviceProperties,
@@ -885,14 +886,13 @@ impl App {
                 Event::KeyUp {
                     keycode: Some(keycode),
                     ..
-                } => match keycode {
-                    sdl2::keyboard::Keycode::F => {
+                } => {
+                    if let sdl2::keyboard::Keycode::F = keycode {
                         self.print_fps = false;
                     }
-                    _ => {}
-                },
-                Event::Window { win_event, .. } => match win_event {
-                    sdl2::event::WindowEvent::Resized(w, h) => {
+                }
+                Event::Window { win_event, .. } => {
+                    if let sdl2::event::WindowEvent::Resized(w, h) = win_event {
                         if self.opt.frames_in_flight > 2 {
                             self.opt.frames_in_flight = 2;
                         } else {
@@ -900,8 +900,7 @@ impl App {
                         }
                         self.resize(w as u32, h as u32, self.opt.frames_in_flight, false);
                     }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -967,7 +966,7 @@ impl App {
                 *frame.mesh_set = create_mesh_buffer_set(
                     &self.device,
                     &mut self.descriptor_set_manager,
-                    &frame.mesh_buffer,
+                    frame.mesh_buffer,
                     &self.mesh_set_layout,
                 );
             }
@@ -1019,7 +1018,7 @@ impl App {
                 *frame.indirect_buffer_set = create_indirect_buffer_set(
                     &self.device,
                     &mut self.descriptor_set_manager,
-                    &frame.indirect_buffer,
+                    frame.indirect_buffer,
                     &self.indirect_buffer_set_layout,
                 );
             }
@@ -1110,7 +1109,7 @@ impl App {
                 pipeline: &'a RenderPipeline,
             }
             let mut indirect_draws = Vec::new();
-            let mut last_pipeline = 0 as *const RenderPipeline;
+            let mut last_pipeline = std::ptr::null::<RenderPipeline>();
             let instancing_batches_len = instancing_batches.len();
             for (instance_draw, pipeline) in instancing_batches.into_iter().enumerate() {
                 let this_pipeline = pipeline as *const RenderPipeline;
@@ -1172,8 +1171,8 @@ impl App {
                 let dst_stage_mask = vk::PipelineStageFlags::DRAW_INDIRECT;
                 self.device.cmd_pipeline_barrier(
                     cmd,
-                    src_stage_mask,
-                    dst_stage_mask,
+                    Some(src_stage_mask),
+                    Some(dst_stage_mask),
                     None,
                     &[],
                     &[buffer_memory_barrier],
@@ -1382,9 +1381,9 @@ fn main() {
     let mut renderables = Vec::new();
     let texture = Arc::new(Texture::new(app.device().clone(), image));
     let suzanne = Arc::new(app.meshes.register_mesh(suzanne_mesh));
-    let texture = app.load_texture(texture.clone()) as u32;
+    let texture = app.load_texture(texture) as u32;
     let mut suzanne = Renderable {
-        mesh: suzanne.clone(),
+        mesh: suzanne,
         pipeline: rgb_pipeline,
         transform: cgmath::Matrix4::identity(),
         texture: texture,
@@ -1415,7 +1414,7 @@ fn main() {
     let image = AllocatedImage::load(&app.image_loader, &[0x20; 4 * 4 * 4], 4, 4);
 
     let texture = Arc::new(Texture::new(app.device().clone(), image));
-    let texture = app.load_texture(texture.clone()) as u32;
+    let texture = app.load_texture(texture) as u32;
     let triangle_mesh = Arc::new(triangle_mesh);
     let mut triangle = Renderable {
         mesh: triangle_mesh,
@@ -1441,7 +1440,7 @@ fn main() {
 }
 fn mesh_pipeline(device: Arc<Device>) -> MaterialLoadFn {
     let vert_shader = ShaderModule::load(device.clone(), "./shaders/mesh.vert.spv").unwrap();
-    let frag_shader = ShaderModule::load(device.clone(), "./shaders/mesh.frag.spv").unwrap();
+    let frag_shader = ShaderModule::load(device, "./shaders/mesh.frag.spv").unwrap();
     Box::new(move |args| {
         let set_layouts = args
             .set_layouts
@@ -1510,8 +1509,7 @@ fn mesh_pipeline(device: Arc<Device>) -> MaterialLoadFn {
 fn rgb_pipeline(device: Arc<Device>) -> MaterialLoadFn {
     let frag_shader =
         ShaderModule::load(device.clone(), "./shaders/rgb_triangle.frag.spv").unwrap();
-    let vert_shader =
-        ShaderModule::load(device.clone(), "./shaders/rgb_triangle.vert.spv").unwrap();
+    let vert_shader = ShaderModule::load(device, "./shaders/rgb_triangle.vert.spv").unwrap();
     let vertex_description = Vertex::get_vertex_description();
     Box::new(move |args| {
         let width = args.width;
