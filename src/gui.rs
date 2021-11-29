@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use crate::{
     buffer::AllocatedBuffer,
-    handles::{Allocator, Pipeline, PipelineDesc, ShaderModule},
+    descriptor_sets::{DescriptorSetLayout, DescriptorSetManager},
+    handles::{Allocator, Pipeline, PipelineDesc, Sampler, ShaderModule},
     image::{AllocatedImage, ImageLoader, Texture},
     mesh::{Mesh, MeshBounds, VertexInfoDescription},
     utils::{
@@ -142,7 +143,8 @@ pub struct EruptEgui {
     font_texture_version: u64,
     buffers: Vec<Arc<AllocatedBuffer>>,
     frame: usize,
-    texture: Option<usize>,
+    texture: Option<Arc<Texture>>,
+    sampler: Arc<Sampler>,
 }
 impl EruptEgui {
     pub fn new(app: &mut crate::App, frames_in_flight: usize) -> Self {
@@ -194,7 +196,7 @@ impl EruptEgui {
                         .cull_mode(vk::CullModeFlags::NONE),
                     multisample_state: &multisampling_state_create_info(),
                     layout: *pipeline_layout,
-                    depth_stencil: &depth_stencil_create_info(true, true, vk::CompareOp::LESS),
+                    depth_stencil: &depth_stencil_create_info(false, false, vk::CompareOp::LESS),
                 },
             );
             RenderPipeline {
@@ -216,6 +218,14 @@ impl EruptEgui {
                 ))
             })
             .collect();
+        let filter = vk::Filter::NEAREST;
+        let address_mode = vk::SamplerAddressMode::REPEAT;
+        let sampler = vk::SamplerCreateInfoBuilder::new()
+            .mag_filter(filter)
+            .address_mode_u(address_mode)
+            .address_mode_v(address_mode)
+            .address_mode_w(address_mode);
+        let sampler = Arc::new(Sampler::new(app.device.clone(), &sampler));
         Self {
             ctx: egui::CtxRef::default(),
             raw_input: Self::default_input(),
@@ -225,6 +235,7 @@ impl EruptEgui {
             buffers,
             frame: 0,
             texture: None,
+            sampler,
         }
     }
     fn default_input() -> egui::RawInput {
@@ -244,7 +255,13 @@ impl EruptEgui {
             dropped_files: Vec::new(),
         }
     }
-    fn upload_font_texture(&mut self, image_loader: &ImageLoader, texture: Arc<egui::Texture>) {
+    fn upload_font_texture(
+        &mut self,
+        image_loader: &ImageLoader,
+        descriptor_set_manager: &mut DescriptorSetManager,
+        texture_set_layout: &DescriptorSetLayout,
+        texture: Arc<egui::Texture>,
+    ) {
         let data = texture
             .pixels
             .iter()
@@ -253,16 +270,25 @@ impl EruptEgui {
         let width = texture.width as u32;
         let height = texture.height as u32;
         let image = AllocatedImage::load(image_loader, &data, width, height);
-        let texture = Texture::new(image_loader.device.clone(), image);
+        let texture = Texture::new(
+            image_loader.device.clone(),
+            descriptor_set_manager,
+            texture_set_layout,
+            image,
+            self.sampler.clone(),
+        );
+        self.texture = Some(Arc::new(texture));
     }
     pub fn run(
         &mut self,
         allocator: Arc<Allocator>,
         image_loader: &ImageLoader,
+        descriptor_set_manager: &mut DescriptorSetManager,
+        texture_set_layout: &DescriptorSetLayout,
         width: f32,
         height: f32,
         f: impl FnOnce(&egui::CtxRef),
-    ) -> &[Renderable] {
+    ) {
         self.raw_input.screen_rect = Some(egui::Rect {
             min: egui::pos2(0.0, 0.0),
             max: egui::pos2(width, height),
@@ -271,18 +297,25 @@ impl EruptEgui {
             &mut self.raw_input,
             Self::default_input(),
         ));
-        let font = self.ctx.fonts().texture();
-        if font.version != self.font_texture_version {
-            self.font_texture_version = font.version;
-            self.upload_font_texture(image_loader, font);
+        let texture = self.ctx.fonts().texture();
+        if texture.version != self.font_texture_version {
+            self.font_texture_version = texture.version;
+            self.upload_font_texture(
+                image_loader,
+                descriptor_set_manager,
+                texture_set_layout,
+                texture,
+            );
         }
         f(&self.ctx);
         let (output, shapes) = self.ctx.end_frame();
         if !output.needs_repaint {
-            return &self.last_mesh;
+            return;
         }
         let clipped_meshes = self.ctx.tessellate(shapes);
         self.last_mesh = self.draw(clipped_meshes, allocator);
+    }
+    pub fn renderables(&self) -> &[Renderable] {
         &self.last_mesh
     }
     fn draw(
@@ -290,6 +323,12 @@ impl EruptEgui {
         clipped_meshes: Vec<egui::ClippedMesh>,
         allocator: Arc<Allocator>,
     ) -> Vec<Renderable> {
+        let font_texture = if let Some(font_texture) = self.texture.as_ref().map(|t| t.set.clone())
+        {
+            font_texture
+        } else {
+            return Vec::new();
+        };
         let l = self.buffers.len();
         let buffer = &mut self.buffers[self.frame % l];
         self.frame += 1;
@@ -299,8 +338,8 @@ impl EruptEgui {
             for mesh in clipped_meshes.iter() {
                 let egui::ClippedMesh(rect, mesh) = mesh;
                 let texture = match mesh.texture_id {
-                    egui::TextureId::Egui => self.texture.unwrap_or(0) as u32,
-                    egui::TextureId::User(id) => id as u32,
+                    egui::TextureId::Egui => font_texture.clone(),
+                    egui::TextureId::User(_id) => todo!(),
                 };
                 let min = cgmath::Vector3::new(rect.min.x, rect.min.y, 0.0);
                 let max = cgmath::Vector3::new(rect.max.x, rect.max.y, 0.0);
@@ -343,7 +382,9 @@ impl EruptEgui {
                     mesh,
                     pipeline: self.pipeline,
                     transform: cgmath::Matrix4::identity(),
-                    texture,
+                    custom_set: texture,
+                    custom_id: 0,
+                    uncullable: true,
                 });
             }
             break meshes;

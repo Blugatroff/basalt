@@ -20,7 +20,11 @@ layout(set = 0, binding = 0) uniform GlobalUniform {
 } globalUniform;
 
 struct Object {
-	mat4 model;
+  mat4 transform;
+  uint draw;
+  uint firstInstance;
+  uint uncullable;
+  uint unused_3;
   uint texture;
   uint mesh;
   uint batch;
@@ -34,10 +38,9 @@ layout(std140, set = 1, binding = 0) readonly buffer ObjectBuffer {
 void main()
 {
   Object object = objectBuffer.objects[objectBuffer.objects[gl_InstanceIndex].redirect];
-  mat4 model_matrix = object.model;
-  outPosition = (model_matrix * vec4(vPosition, 1.0)).xyz;
-  gl_Position = globalUniform.viewProj * model_matrix * vec4(vPosition, 1.0f);
-  outNormal = mat3(model_matrix) * vNormal;
+  outPosition = (object.transform * vec4(vPosition, 1.0)).xyz;
+  gl_Position = globalUniform.viewProj * object.transform * vec4(vPosition, 1.0f);
+  outNormal = mat3(object.transform) * vNormal;
   outUv = vUv;
   texId = object.texture & 0xFFFF;
 }

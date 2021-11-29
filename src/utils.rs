@@ -9,6 +9,7 @@ use crate::{
     image::AllocatedImage,
     GlobalUniform, GpuSceneData, TransferContext, LAYER_KHRONOS_VALIDATION,
 };
+use egui::Output;
 use erupt::{cstr, vk, DeviceLoader, InstanceLoader};
 use std::{
     ffi::{c_void, CStr, CString},
@@ -895,4 +896,11 @@ pub fn create_mesh_buffer(allocator: Arc<Allocator>, size: u64) -> AllocatedBuff
         Default::default(),
         label!("MeshBuffer"),
     )
+}
+
+pub fn round_to<T>(v: T, a: T) -> T
+where
+    T: std::ops::Add<Output = T> + std::ops::Rem<Output = T> + std::ops::Sub<Output = T> + Copy,
+{
+    v + (a - (v % a))
 }

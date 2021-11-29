@@ -1,4 +1,4 @@
-use crate::handles::*;
+use crate::{handles::*, utils::immediate_submit, TransferContext};
 use erupt::vk;
 use std::sync::Arc;
 
@@ -45,6 +45,38 @@ impl AllocatedBuffer {
     }
     pub fn unmap(&self) {
         self.allocator.unmap_memory(&self.allocation);
+    }
+
+    pub fn copy_to_device_local(
+        &self,
+        device: Arc<Device>,
+        transfer_context: &TransferContext,
+        usage: vk::BufferUsageFlags,
+    ) -> AllocatedBuffer {
+        let buffer_info = vk::BufferCreateInfoBuilder::new()
+            .size(self.size)
+            .usage(usage | vk::BufferUsageFlags::TRANSFER_DST);
+        let device_buffer = Self::new(
+            self.allocator.clone(),
+            *buffer_info,
+            vk_mem_erupt::MemoryUsage::GpuOnly,
+            Default::default(),
+            label!("MeshBuffer"),
+        );
+
+        immediate_submit(&device, transfer_context, |cmd| unsafe {
+            device.cmd_copy_buffer(
+                cmd,
+                **self,
+                *device_buffer,
+                &[vk::BufferCopyBuilder::new()
+                    .dst_offset(0)
+                    .src_offset(0)
+                    .size(self.size)],
+            )
+        });
+        assert!(device_buffer.size >= self.size);
+        device_buffer
     }
 }
 

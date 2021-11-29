@@ -14,12 +14,17 @@ layout(set = 0, binding = 0) uniform GlobalUniform {
 } globalUniform;
  
 struct Object {
-	mat4 model;
+  mat4 transform;
+  uint draw;
+  uint firstInstance;
+  uint uncullable;
+  uint unused_3;
   uint texture;
   uint mesh;
   uint batch;
   uint redirect;
 };
+
 
 layout(std140, set = 1, binding = 0) readonly buffer ObjectBuffer {
 	Object objects[];
@@ -28,6 +33,6 @@ layout(std140, set = 1, binding = 0) readonly buffer ObjectBuffer {
 void main() {
   color = vNormal * 0.5 + 0.5;
   Object object = objectBuffer.objects[objectBuffer.objects[gl_InstanceIndex].redirect];
-  vec4 worldPos = object.model * vec4(vPosition, 1.0);
+  vec4 worldPos = object.transform * vec4(vPosition, 1.0);
   gl_Position = globalUniform.viewProj * worldPos;
 }

@@ -242,9 +242,19 @@ impl DescriptorSetManager {
     }
 }
 
+impl std::fmt::Debug for DescriptorSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DescriptorSet")
+            .field("set", &self.set)
+            .field("pool", &self.pool)
+            .finish()
+    }
+}
+
 pub struct DescriptorSet {
     set: vk::DescriptorSet,
     pool: Arc<DescriptorPool>,
+    resources: Vec<Box<dyn Unpin>>,
 }
 
 impl DescriptorSet {
@@ -263,7 +273,15 @@ impl DescriptorSet {
         }
         let set = unsafe { device.allocate_descriptor_sets(&alloc_info) }.unwrap()[0];
         pool.allocate_set(&set_layout.bindings);
-        DescriptorSet { set, pool }
+        let resources = Vec::new();
+        DescriptorSet {
+            set,
+            pool,
+            resources,
+        }
+    }
+    pub fn attach_resources(&mut self, r: Box<dyn Unpin>) {
+        self.resources.push(r);
     }
 }
 

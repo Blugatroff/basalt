@@ -1,5 +1,5 @@
 #![feature(stmt_expr_attributes)]
-use crate::image::ImageLoader;
+use crate::{descriptor_sets::DescriptorSet, image::ImageLoader};
 use buffer::AllocatedBuffer;
 use cgmath::SquareMatrix;
 use descriptor_sets::{DescriptorSetLayout, DescriptorSetManager};
@@ -7,6 +7,7 @@ use erupt::{cstr, vk};
 use gui::EruptEgui;
 use sdl2::{event::Event, EventPump};
 use std::{
+    collections::VecDeque,
     ffi::{c_void, CStr},
     os::raw::c_char,
     sync::Arc,
@@ -83,10 +84,12 @@ pub struct RenderPipeline {
 
 #[derive(Clone)]
 pub struct Renderable {
-    pub mesh: Arc<Mesh>,
-    pub pipeline: usize,
     pub transform: cgmath::Matrix4<f32>,
-    pub texture: u32,
+    pub mesh: Arc<Mesh>,
+    pub custom_set: Arc<DescriptorSet>,
+    pub custom_id: u32,
+    pub uncullable: bool,
+    pub pipeline: usize,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -137,8 +140,12 @@ struct GpuMesh {
 #[repr(C)]
 #[derive(Copy, Debug, Clone)]
 struct GpuDataRenderable {
-    model_matrix: cgmath::Matrix4<f32>,
-    texture: u32,
+    transform: cgmath::Matrix4<f32>,
+    draw: u32,
+    first_instance: u32,
+    uncullable: u32,
+    unused_3: u32,
+    custom_id: u32,
     mesh: u32,
     batch: u32,
     redirect: u32,
@@ -171,6 +178,7 @@ pub struct App {
     global_uniform_offset: u64,
     graphics_queue_family: u32,
     opt: Opt,
+    mouse_captured: bool,
     gpu_scene_data: GpuSceneData,
     compute_pipeline: ComputePipeline,
     compute_pipeline_layout: PipelineLayout,
@@ -186,7 +194,7 @@ pub struct App {
     sdl: sdl2::Sdl,
     mesh_set_layout: DescriptorSetLayout,
     must_resize: bool,
-    sampler: Sampler,
+    sampler: Arc<Sampler>,
     event_pump: EventPump,
     window: sdl2::video::Window,
     graphics_queue: vk::Queue,
@@ -201,6 +209,7 @@ pub struct App {
     frames: Frames,
     uniform_buffer: AllocatedBuffer,
     frames_in_flight: usize,
+    texture_set_layout: DescriptorSetLayout,
     frame_number: u64,
     image_loader: ImageLoader,
     #[allow(dead_code)]
@@ -222,6 +231,7 @@ pub struct App {
     instance: Arc<Instance>,
     #[allow(dead_code)]
     entry: erupt::EntryLoader,
+    last_frame_times: std::collections::VecDeque<(f32, f32, f32)>,
 }
 
 fn create_sync_objects(
@@ -382,8 +392,19 @@ impl App {
         let sampler = Sampler::new(device.clone(), &sampler);
         let mut descriptor_set_manager = DescriptorSetManager::new(device.clone());
         let textures_set_layout = create_textures_set_layout(&device, 1, &sampler);
+        let texture_set_layout = DescriptorSetLayout::new(
+            device.clone(),
+            vec![DescriptorSetLayoutBinding {
+                binding: 0,
+                count: 1,
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                immutable_samplers: None,
+            }],
+            None,
+        );
         let textures: Vec<Arc<Texture>> = Vec::new();
-        let views = textures.iter().map(|i| &i.view);
+        let views = textures.iter().map(|i| &*i.view);
         let descriptor_sets = (0..frames_in_flight)
             .map(|i| {
                 let (uniform_set, object_set) = create_descriptor_sets(
@@ -460,7 +481,7 @@ impl App {
             .flags(vk::PipelineLayoutCreateFlags::empty());
         let compute_pipeline_layout =
             PipelineLayout::new(device.clone(), &pipeline_layout_create_info);
-        let compute_shader = ShaderModule::load(device.clone(), "./shaders/test.comp.spv").unwrap();
+        let compute_shader = ShaderModule::load(device.clone(), "./shaders/cull.comp.spv").unwrap();
         let compute_pipeline =
             ComputePipeline::new(device.clone(), &compute_pipeline_layout, &compute_shader);
 
@@ -546,7 +567,12 @@ impl App {
             transfer_context: transfer_context.clone(),
             allocator: allocator.clone(),
         };
+        let sampler = Arc::new(sampler);
+        let mouse_captured = true;
+        let last_frame_times = VecDeque::new();
         let mut app = Self {
+            last_frame_times,
+            mouse_captured,
             image_loader,
             text,
             egui,
@@ -599,6 +625,7 @@ impl App {
             uniform_buffer,
             scene_data_offset,
             global_uniform_offset,
+            texture_set_layout,
         };
         let egui = EruptEgui::new(&mut app, 5);
         app.egui = Some(egui);
@@ -613,7 +640,7 @@ impl App {
             set_layouts: vec![
                 &self.global_set_layout,
                 &self.object_set_layout,
-                &self.textures_set_layout,
+                &self.texture_set_layout,
             ],
             device: &self.device,
             width,
@@ -621,22 +648,6 @@ impl App {
             render_pass: &self.render_pass,
             opt: &self.opt,
         }
-    }
-    fn load_texture(&mut self, texture: Arc<Texture>) -> usize {
-        self.textures.push(texture);
-        let views = self.textures.iter().map(|texture| &texture.view);
-        self.textures_set_layout =
-            create_textures_set_layout(&self.device, self.textures.len(), &self.sampler);
-        for (_, _, set) in &mut self.frames.descriptor_sets {
-            *set = create_textures_set(
-                &self.device,
-                &mut self.descriptor_set_manager,
-                views.clone(),
-                &self.textures_set_layout,
-            );
-        }
-        self.reload_pipelines();
-        self.textures.len() - 1
     }
     fn register_pipeline(&mut self, create_fn: MaterialLoadFn) -> usize {
         let material = create_fn(self.pipeline_creation_params());
@@ -697,7 +708,7 @@ impl App {
                 .cleanup
                 .resize_with(self.frames_in_flight, || None);
             //self.frames.descriptor_sets.clear();
-            let views = self.textures.iter().map(|t| &t.view);
+            let views = self.textures.iter().map(|t| &*t.view);
             let mut textures_sets = self.frames.descriptor_sets.drain(..).map(|(_, _, a)| a);
             let descriptor_sets = (0..self.frames_in_flight)
                 .zip(&mut self.frames.renderables_buffers)
@@ -806,13 +817,51 @@ impl App {
             material.0 = new_material;
         }
     }
+    fn ui(&mut self) {
+        let (width, height) = self.window.size();
+        self.egui.as_mut().unwrap().run(
+            self.allocator.clone(),
+            &self.image_loader,
+            &mut self.descriptor_set_manager,
+            &self.texture_set_layout,
+            width as f32,
+            height as f32,
+            |ctx| {
+                ctx.request_repaint();
+                egui::Window::new("TEST").show(ctx, |ui| {
+                    ui.add({
+                        egui::plot::Plot::new(0)
+                            .line(
+                                egui::plot::Line::new(egui::plot::Values::from_values_iter(
+                                    self.last_frame_times
+                                        .iter()
+                                        .map(|(t, v, _)| egui::plot::Value::new(*t, *v * 1000.0)),
+                                ))
+                                .color(egui::Color32::BLUE)
+                                .name("Frametime"),
+                            )
+                            .line(
+                                egui::plot::Line::new(egui::plot::Values::from_values_iter(
+                                    self.last_frame_times
+                                        .iter()
+                                        .map(|(t, _, v)| egui::plot::Value::new(*t, *v * 1000.0)),
+                                ))
+                                .color(egui::Color32::RED)
+                                .name("GPU-Wait"),
+                            )
+                            .legend(egui::plot::Legend::default())
+                            .allow_drag(false)
+                            .allow_zoom(false)
+                    })
+                });
+            },
+        );
+    }
     fn update(&mut self, renderables: &[Renderable]) -> bool {
-        let now = std::time::Instant::now();
-        let dt = now - self.last_time;
-        self.last_time = now;
-        self.frame_number += 1;
         for event in self.event_pump.poll_iter().collect::<Vec<_>>().into_iter() {
-            self.input.process_event(&event);
+            if self.mouse_captured {
+                self.input.process_event(&event);
+            }
             self.egui.as_mut().unwrap().process_event(&event);
             match event {
                 Event::Quit { .. } => {
@@ -830,6 +879,14 @@ impl App {
                     }
                     sdl2::keyboard::Keycode::J => {
                         self.opt.indirect = !self.opt.indirect;
+                    }
+                    sdl2::keyboard::Keycode::E => {
+                        self.mouse_captured = !self.mouse_captured;
+                        self.sdl.mouse().capture(self.mouse_captured);
+                        self.window.set_grab(self.mouse_captured);
+                        self.sdl
+                            .mouse()
+                            .set_relative_mouse_mode(self.mouse_captured);
                     }
                     _ => {}
                 },
@@ -854,19 +911,17 @@ impl App {
                 _ => {}
             }
         }
+        self.render(renderables);
+        true
+    }
+    fn render(&mut self, renderables: &[Renderable]) {
+        let now = std::time::Instant::now();
+        let dt = now - self.last_time;
+        let time = self.start.elapsed().as_secs_f32();
+        self.last_time = now;
+        self.frame_number += 1;
+        self.ui();
         let (width, height) = self.window.size();
-        let egui_renderables = self.egui.as_mut().unwrap().run(
-            self.allocator.clone(),
-            &self.image_loader,
-            width as f32,
-            height as f32,
-            |ctx| {
-                egui::Window::new("TEST")
-                    .show(ctx, |ui| ui.add(egui::TextEdit::singleline(&mut self.text)));
-            },
-        );
-        let renderables_len = renderables.len() + egui_renderables.len();
-        let renderables = renderables.iter().chain(egui_renderables);
         self.camera
             .update(&self.input.make_controls(dt.as_secs_f32()));
         let aspect = width as f32 / height as f32;
@@ -878,13 +933,15 @@ impl App {
                 200.0,
             );
         self.global_uniform.time = self.start.elapsed().as_secs_f32();
-        self.global_uniform.renderables_count = renderables_len as u32;
-        //self.global_uniform.camera_pos = self.camera.get_position();
         self.global_uniform.screen_width = width as f32;
         self.global_uniform.screen_height = height as f32;
+        let egui_renderables = self.egui.as_ref().unwrap().renderables();
+        let renderables_len = renderables.len() + egui_renderables.len();
+        let renderables = renderables.iter().chain(egui_renderables);
+        self.global_uniform.renderables_count = renderables_len as u32;
         unsafe {
             if self.must_resize {
-                return true;
+                return;
             }
             let frame_index = self.frame_number as usize % self.frames_in_flight;
             let frame = self.frames.get(frame_index);
@@ -900,14 +957,13 @@ impl App {
             if let Some(f) = frame.cleanup.take() {
                 f();
             }
-            if self.print_fps {
-                println!(
-                    "indirect: {}, fps: {}, dt: {:?}\nGPU-Wait: {:?}",
-                    self.opt.indirect,
-                    1.0 / dt.as_secs_f64(),
-                    dt,
-                    wait_start.elapsed()
-                );
+            self.last_frame_times.push_back((
+                time,
+                dt.as_secs_f32(),
+                wait_start.elapsed().as_secs_f32(),
+            ));
+            while self.last_frame_times.len() > 1000 {
+                self.last_frame_times.pop_front();
             }
 
             if renderables_len * std::mem::size_of::<GpuDataRenderable>()
@@ -962,7 +1018,7 @@ impl App {
                     value as usize
                 } else {
                     self.must_resize = true;
-                    return true;
+                    return;
                 }
             };
 
@@ -1013,6 +1069,7 @@ impl App {
                 index_start: u32,
                 instance_count: u32,
                 vertex_start: u32,
+                custom_set: &'a DescriptorSet,
             }
             let renderables_len = renderables.clone().count();
             let mesh_buffer_min_size = renderables_len * std::mem::size_of::<GpuMesh>();
@@ -1042,24 +1099,29 @@ impl App {
             }
             frame.mesh_buffer.unmap();
             let mut last_buffer = std::ptr::null();
+            let mut last_custom_set = std::ptr::null();
             let mut meshes = Vec::new();
+            let mut textures = Vec::new();
             for (i, renderable) in renderables.clone().enumerate() {
                 meshes.push(renderable.mesh.clone());
+                textures.push(renderable.custom_set.clone());
                 let this_pipeline = renderable.pipeline;
                 let this_mesh = &*renderable.mesh;
                 let this_buffer = Arc::as_ptr(&renderable.mesh.buffer);
+                let this_custom_set = &*renderable.custom_set;
                 if this_pipeline != last_pipeline || this_buffer != last_buffer {
                     indirect_draw += 1;
                 }
                 let ptr = objects_ptr.add(i);
-                (*ptr).texture = 0;
+                (*ptr).custom_id = 0;
                 if this_pipeline != last_pipeline
                     || this_mesh as *const Mesh != last_mesh
                     || this_buffer != last_buffer
+                    || this_custom_set as *const DescriptorSet != last_custom_set
                 {
                     debug_assert!((i as u32) & 0xFFFF0000 == 0);
                     let ptr = objects_ptr.add(instancing_batches.len());
-                    (*ptr).texture = (i as u32) << 16;
+                    (*ptr).first_instance = i as u32;
                     instancing_batches.push(InstancingBatch {
                         pipeline: &self.materials[renderable.pipeline].as_ref().unwrap().0,
                         index_vertex_buffer: &this_mesh.buffer,
@@ -1067,28 +1129,34 @@ impl App {
                         index_start: this_mesh.index_start,
                         vertex_start: this_mesh.vertex_start,
                         instance_count: 0,
+                        custom_set: &*renderable.custom_set,
                     });
                 }
                 last_pipeline = this_pipeline;
                 last_buffer = this_buffer;
                 last_mesh = this_mesh as *const Mesh;
-                (*ptr).model_matrix = renderable.transform;
-                debug_assert!(renderable.texture & 0xFFFF0000 == 0);
-                (*ptr).texture |= renderable.texture & 0x0000FFFF;
+                last_custom_set = this_custom_set as *const DescriptorSet;
+                (*ptr).transform = renderable.transform;
+                (*ptr).custom_id = renderable.custom_id;
+                (*ptr).uncullable = if renderable.uncullable { 1 } else { 0 };
                 (*ptr).mesh = i as u32;
                 let instancing_batch = instancing_batches.len() as u32 - 1;
-                debug_assert!(instancing_batch & 0xFFFF0000 == 0);
-                (*ptr).batch = instancing_batch | ((indirect_draw - 1) << 16);
+                (*ptr).draw = indirect_draw - 1;
+                (*ptr).batch = instancing_batch;
                 (*ptr).redirect = i as u32;
                 instancing_batches.last_mut().unwrap().instance_count += 1;
             }
-            *frame.cleanup = Some(Box::new(|| drop(meshes)) as Box<dyn FnOnce()>);
+            *frame.cleanup = Some(Box::new(|| {
+                drop(meshes);
+                drop(textures);
+            }) as Box<dyn FnOnce()>);
             frame.renderables_buffer.unmap();
             struct IndirectDraw<'a> {
                 draw_count: usize,
                 first_draw: usize,
                 pipeline: &'a RenderPipeline,
                 vertex_index_buffer: &'a AllocatedBuffer,
+                custom_set: &'a DescriptorSet,
             }
             let mut indirect_draws = Vec::new();
             let mut last_pipeline = std::ptr::null::<RenderPipeline>();
@@ -1103,6 +1171,7 @@ impl App {
                         first_draw: instance_draw,
                         pipeline: batch.pipeline,
                         vertex_index_buffer: batch.index_vertex_buffer,
+                        custom_set: batch.custom_set,
                     });
                     last_pipeline = this_pipeline;
                     last_buffer = this_buffer;
@@ -1214,7 +1283,7 @@ impl App {
                         &[
                             *frame.descriptor_sets.0,
                             *frame.descriptor_sets.1,
-                            *frame.descriptor_sets.2,
+                            **indirect_draw.custom_set,
                         ],
                         &[global_uniform_offset as u32, scene_data_offset as u32],
                     );
@@ -1250,6 +1319,7 @@ impl App {
                         vk::PipelineBindPoint::GRAPHICS,
                         *batch.pipeline.pipeline,
                     );
+
                     self.device.cmd_bind_descriptor_sets(
                         cmd,
                         vk::PipelineBindPoint::GRAPHICS,
@@ -1258,10 +1328,11 @@ impl App {
                         &[
                             *frame.descriptor_sets.0,
                             *frame.descriptor_sets.1,
-                            *frame.descriptor_sets.2,
+                            **batch.custom_set,
                         ],
                         &[global_uniform_offset as u32, scene_data_offset as u32],
                     );
+
                     self.device.cmd_draw_indexed(
                         cmd,
                         batch.index_count,
@@ -1305,7 +1376,6 @@ impl App {
                 println!("{:#?}", res);
             }
         }
-        true
     }
 }
 
@@ -1364,26 +1434,39 @@ fn main() {
         app.allocator.clone(),
         &app.transfer_context,
         app.device.clone(),
-        false,
+        true,
     );
     let suzanne_mesh = Mesh::load(
         app.allocator.clone(),
         "./assets/suzanne.obj",
         &app.transfer_context,
         app.device.clone(),
-        false,
     )
     .swap_remove(0);
-
+    let mut meshes = vec![triangle_mesh, suzanne_mesh];
+    Mesh::combine_meshes(
+        &mut meshes,
+        app.allocator.clone(),
+        &app.transfer_context,
+        app.device.clone(),
+    );
+    let [triangle_mesh, suzanne_mesh]: [Mesh; 2] = meshes.try_into().unwrap();
     let image = AllocatedImage::open(&app.image_loader, "./assets/lost_empire-RGBA.png");
     let mut renderables = Vec::new();
-    let texture = Arc::new(Texture::new(app.device().clone(), image));
-    let texture = app.load_texture(texture) as u32;
+    let texture = Arc::new(Texture::new(
+        app.device().clone(),
+        &mut app.descriptor_set_manager,
+        &app.texture_set_layout,
+        image,
+        app.sampler.clone(),
+    ));
     let mut suzanne = Renderable {
         mesh: Arc::new(suzanne_mesh),
         pipeline: rgb_pipeline,
         transform: cgmath::Matrix4::identity(),
-        texture,
+        custom_set: texture.set.clone(),
+        custom_id: 0,
+        uncullable: false,
     };
 
     let s = opt.test;
@@ -1403,25 +1486,25 @@ fn main() {
         "./assets/lost_empire.obj",
         &app.transfer_context,
         app.device.clone(),
-        false,
     )
     .into_iter()
     .map(|mesh| Renderable {
         mesh: Arc::new(mesh),
         pipeline: mesh_pipeline,
         transform: cgmath::Matrix4::identity(),
-        texture,
+        custom_set: texture.set.clone(),
+        custom_id: 0,
+        uncullable: false,
     })
     .collect::<Vec<Renderable>>();
-    let image = AllocatedImage::load(&app.image_loader, &[0x20; 4 * 4 * 4], 4, 4);
 
-    let texture = Arc::new(Texture::new(app.device().clone(), image));
-    let texture = app.load_texture(texture) as u32;
     let mut triangle = Renderable {
         mesh: Arc::new(triangle_mesh),
         pipeline: rgb_pipeline,
         transform: cgmath::Matrix4::from_scale(1.0),
-        texture,
+        custom_set: texture.set.clone(),
+        custom_id: 0,
+        uncullable: false,
     };
     triangle.transform = cgmath::Matrix4::from_translation(cgmath::Vector3::new(-3.0, 0.0, 0.0))
         * cgmath::Matrix4::from_scale(2.0);

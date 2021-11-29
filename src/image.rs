@@ -1,6 +1,7 @@
 use crate::{
     buffer::AllocatedBuffer,
-    handles::{Allocator, Device, ImageView},
+    descriptor_sets::{DescriptorSet, DescriptorSetLayout, DescriptorSetManager},
+    handles::{Allocator, Device, ImageView, Sampler},
     utils::immediate_submit,
     TransferContext,
 };
@@ -200,22 +201,31 @@ impl Drop for AllocatedImage {
 }
 
 pub struct Texture {
-    pub image: AllocatedImage,
-    pub view: ImageView,
+    pub image: Arc<AllocatedImage>,
+    pub view: Arc<ImageView>,
+    pub set: Arc<DescriptorSet>,
+    pub sampler: Arc<Sampler>,
 }
 
 impl Texture {
-    pub fn new(device: Arc<Device>, image: AllocatedImage) -> Self {
+    pub fn new(
+        device: Arc<Device>,
+        descriptor_set_manager: &mut DescriptorSetManager,
+        texture_set_layout: &DescriptorSetLayout,
+        image: AllocatedImage,
+        sampler: Arc<Sampler>,
+    ) -> Self {
+        let image = Arc::new(image);
         let image_view_create_info = AllocatedImage::image_view_create_info(
             vk::Format::R8G8B8A8_SRGB,
-            *image,
+            **image,
             vk::ImageAspectFlags::COLOR,
         );
-        let view = ImageView::new(device.clone(), &image_view_create_info);
-        /* let set = descriptor_set_manager.allocate(&texture_set_layout);
+        let view = Arc::new(ImageView::new(device.clone(), &image_view_create_info));
+        let mut set = descriptor_set_manager.allocate(texture_set_layout, None);
         let image_info = vk::DescriptorImageInfoBuilder::new()
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image_view(*view)
+            .image_view(**view)
             .sampler(**sampler);
         let image_info = &[image_info];
         let image_write = vk::WriteDescriptorSetBuilder::new()
@@ -223,7 +233,15 @@ impl Texture {
             .dst_binding(0)
             .dst_set(*set)
             .image_info(image_info);
-        unsafe { device.update_descriptor_sets(&[image_write], &[]) }; */
-        Self { image, view }
+        unsafe { device.update_descriptor_sets(&[image_write], &[]) };
+        set.attach_resources(Box::new(Arc::clone(&image)));
+        set.attach_resources(Box::new(Arc::clone(&view)));
+        let set = Arc::new(set);
+        Self {
+            image,
+            view,
+            set,
+            sampler,
+        }
     }
 }

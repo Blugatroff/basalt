@@ -1,5 +1,5 @@
 use crate::handles::Device;
-use crate::utils::immediate_submit;
+use crate::utils::{immediate_submit, round_to};
 use crate::{handles::Allocator, AllocatedBuffer};
 use crate::{GpuDataRenderable, TransferContext};
 use erupt::vk;
@@ -183,6 +183,7 @@ pub struct MeshBounds {
     pub min: cgmath::Vector3<f32>,
 }
 
+#[derive(Debug)]
 pub struct Mesh {
     pub bounds: MeshBounds,
     pub vertex_start: u32,
@@ -190,6 +191,7 @@ pub struct Mesh {
     pub vertex_count: u32,
     pub index_count: u32,
     pub buffer: Arc<AllocatedBuffer>,
+    vertex_type_size: usize,
 }
 
 impl Mesh {
@@ -201,6 +203,18 @@ impl Mesh {
         device: Arc<Device>,
         host_visible: bool,
     ) -> Self {
+        let bounds = Self::calculate_bounds(vertices);
+        Self::new_with_bounds(
+            vertices,
+            indices,
+            bounds,
+            allocator,
+            transfer_context,
+            device,
+            host_visible,
+        )
+    }
+    fn calculate_bounds(vertices: &[Vertex]) -> MeshBounds {
         let mut bounds = MeshBounds {
             max: cgmath::Vector3::new(0.0, 0.0, 0.0),
             min: cgmath::Vector3::new(0.0, 0.0, 0.0),
@@ -215,15 +229,7 @@ impl Mesh {
             if p.y < bounds.min.y { bounds.min.y = p.y }
             if p.z < bounds.min.z { bounds.min.z = p.z }
         }
-        Self::new_with_bounds(
-            vertices,
-            indices,
-            bounds,
-            allocator,
-            transfer_context,
-            device,
-            host_visible,
-        )
+        bounds
     }
     pub fn new_into_buffer<V>(
         vertices: &[V],
@@ -259,9 +265,13 @@ impl Mesh {
                 vertex_count: vertices.len() as u32,
                 index_count: indices.len() as u32,
                 buffer,
+                vertex_type_size: std::mem::size_of::<V>(),
             },
             vertices.len() * std::mem::size_of::<V>() + indices.len() * std::mem::size_of::<u32>(),
         ))
+    }
+    pub fn override_buffer(&mut self, buffer: Arc<AllocatedBuffer>) {
+        self.buffer = buffer;
     }
     pub fn new_with_bounds<V>(
         vertices: &[V],
@@ -292,42 +302,68 @@ impl Mesh {
         if host_visible {
             return mesh;
         }
-
+        mesh.buffer = Arc::new(mesh.buffer.copy_to_device_local(
+            device.clone(),
+            transfer_context,
+            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER,
+        ));
+        mesh
+    }
+    pub fn combine_meshes(
+        meshes: &mut Vec<Self>,
+        allocator: Arc<Allocator>,
+        transfer_context: &TransferContext,
+        device: Arc<Device>,
+    ) {
+        let staging_buffer_size = meshes.iter().fold(0, |size, m| {
+            round_to(size, m.vertex_type_size as u64) + m.buffer.size
+        });
         let buffer_info = vk::BufferCreateInfoBuilder::new()
-            .size(mesh.buffer.size)
-            .usage(
-                vk::BufferUsageFlags::VERTEX_BUFFER
-                    | vk::BufferUsageFlags::INDEX_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_DST,
-            );
-        let device_buffer = AllocatedBuffer::new(
+            .size(staging_buffer_size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST);
+        let staging_buffer = Arc::new(AllocatedBuffer::new(
             allocator.clone(),
             *buffer_info,
-            vk_mem_erupt::MemoryUsage::GpuOnly,
+            vk_mem_erupt::MemoryUsage::CpuToGpu,
             Default::default(),
-            label!("MeshBuffer"),
-        );
-
+            label!("CombineMeshesStagingBuffer"),
+        ));
+        let mut offset = 0;
+        println!("HALLO");
         immediate_submit(&device, transfer_context, |cmd| unsafe {
-            device.cmd_copy_buffer(
-                cmd,
-                **mesh.buffer,
-                *device_buffer,
-                &[vk::BufferCopyBuilder::new()
-                    .dst_offset(0)
+            for mesh in meshes.iter_mut() {
+                offset = round_to(offset, mesh.vertex_type_size as u64);
+                let region = vk::BufferCopyBuilder::new()
                     .src_offset(0)
-                    .size(mesh.buffer.size)],
-            )
+                    .dst_offset(offset)
+                    .size(mesh.buffer.size);
+
+                let regions = &[region];
+                device.cmd_copy_buffer(cmd, **mesh.buffer, **staging_buffer, regions);
+                mesh.index_start += offset as u32 / std::mem::size_of::<u32>() as u32;
+                mesh.vertex_start += offset as u32 / (mesh.vertex_type_size as u32);
+                offset += mesh.buffer.size;
+            }
         });
-        mesh.buffer = Arc::new(device_buffer);
-        mesh
+        println!("HALLO");
+        let device_local_buffer = Arc::new(staging_buffer.copy_to_device_local(
+            device.clone(),
+            transfer_context,
+            vk::BufferUsageFlags::VERTEX_BUFFER
+                | vk::BufferUsageFlags::INDEX_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_SRC,
+        ));
+        println!("HALLO");
+
+        for mesh in meshes {
+            mesh.buffer = Arc::clone(&device_local_buffer);
+        }
     }
     pub fn load<P: AsRef<std::path::Path> + std::fmt::Debug>(
         allocator: Arc<Allocator>,
         path: P,
         transfer_context: &TransferContext,
         device: Arc<Device>,
-        host_visible: bool,
     ) -> Vec<Self> {
         let (models, _) = tobj::load_obj(
             &path,
@@ -339,45 +375,48 @@ impl Mesh {
             },
         )
         .unwrap();
-        let mut meshes = Vec::new();
-        for model in models {
-            let positions = model
-                .mesh
-                .positions
-                .chunks_exact(3)
-                .map(|p| cgmath::Vector3::new(p[0], p[1], p[2]));
-            let normals = model
-                .mesh
-                .normals
-                .chunks_exact(3)
-                .map(|p| cgmath::Vector3::new(p[0], p[1], p[2]));
-            let uvs = model
-                .mesh
-                .texcoords
-                .chunks_exact(2)
-                .map(|p| cgmath::Vector2::new(p[0], p[1]));
-            let vertices = positions
-                .zip(normals)
-                .zip(uvs)
-                .map(|((position, normal), mut uv)| {
-                    uv.y = 1.0 - uv.y;
-                    Vertex {
-                        position,
-                        normal,
-                        uv,
-                    }
-                })
-                .collect::<Vec<Vertex>>();
-            let indices = &model.mesh.indices;
-            meshes.push(Self::new(
-                &vertices,
-                indices,
-                allocator.clone(),
-                transfer_context,
-                device.clone(),
-                host_visible,
-            ));
-        }
+        let mut meshes = models
+            .into_iter()
+            .map(|model| {
+                let positions = model
+                    .mesh
+                    .positions
+                    .chunks_exact(3)
+                    .map(|p| cgmath::Vector3::new(p[0], p[1], p[2]));
+                let normals = model
+                    .mesh
+                    .normals
+                    .chunks_exact(3)
+                    .map(|p| cgmath::Vector3::new(p[0], p[1], p[2]));
+                let uvs = model
+                    .mesh
+                    .texcoords
+                    .chunks_exact(2)
+                    .map(|p| cgmath::Vector2::new(p[0], p[1]));
+                let vertices = positions
+                    .zip(normals)
+                    .zip(uvs)
+                    .map(|((position, normal), mut uv)| {
+                        uv.y = 1.0 - uv.y;
+                        Vertex {
+                            position,
+                            normal,
+                            uv,
+                        }
+                    })
+                    .collect::<Vec<Vertex>>();
+                let indices = model.mesh.indices;
+                Self::new(
+                    &vertices,
+                    &indices,
+                    allocator.clone(),
+                    transfer_context,
+                    device.clone(),
+                    true,
+                )
+            })
+            .collect::<Vec<_>>();
+        Self::combine_meshes(&mut meshes, allocator.clone(), transfer_context, device);
         meshes
     }
 }

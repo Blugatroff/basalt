@@ -72,11 +72,11 @@ impl ShaderModule {
         let code = unsafe { std::slice::from_raw_parts(spv.as_ptr() as *const u32, spv.len() / 4) };
         let create_info = vk::ShaderModuleCreateInfoBuilder::new().code(&code);
         let module = unsafe { device.create_shader_module(&create_info, None) }.unwrap();
-        let reflect = spirv_reflect::ShaderModule::load_u32_data(code).unwrap();
+        /* let reflect = spirv_reflect::ShaderModule::load_u32_data(code).unwrap();
         let descriptor_bindings = reflect.enumerate_descriptor_bindings(Some("main")).unwrap();
         let stage = reflect.get_shader_stage();
         //dbg!(reflect.enumerate_input_variables(Some("main"))).unwrap();
-        /* let bindings = descriptor_bindings
+        let bindings = descriptor_bindings
         .into_iter()
         .map(|binding| crate::DescriptorSetLayoutBinding {
             binding: binding.binding,
