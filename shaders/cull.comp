@@ -79,7 +79,6 @@ void main() {
     
     uint indirectDraw = object.batch >> 16;
     uint batch = object.batch & 0x0000FFFF;
-    //indirectBuffer.commands[indirectDraw].batchCount = 0xFFFFFFFF;
     if (visible) {
         uint firstInstance = objectBuffer.objects[batch].texture >> 16;
         uint objectIndex = atomicAdd(indirectBuffer.commands[batch].instanceCount, 1);
@@ -91,6 +90,5 @@ void main() {
             indirectBuffer.commands[batch].vertexOffset = mesh.vertexOffset;
         }
         objectBuffer.objects[firstInstance + objectIndex].redirect = gID;
-        //objectBuffer.objects[gID].redirect = gID;
     }
 }

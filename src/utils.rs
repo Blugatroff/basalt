@@ -23,7 +23,7 @@ pub fn rasterization_state_create_info<'a>(
         .rasterizer_discard_enable(false)
         .polygon_mode(polygon_mode)
         .line_width(1.0)
-        .cull_mode(vk::CullModeFlags::NONE)
+        .cull_mode(vk::CullModeFlags::BACK)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .depth_bias_enable(false)
         .depth_bias_constant_factor(0.0)
@@ -206,6 +206,7 @@ pub fn create_uniform_buffer(
                 .usage(vk::BufferUsageFlags::UNIFORM_BUFFER),
             vk_mem_erupt::MemoryUsage::CpuToGpu,
             Default::default(),
+            label!("UniformBuffer"),
         ),
         global_uniform_offset,
         scene_data_offset,
@@ -699,6 +700,7 @@ pub fn create_renderables_buffer(allocator: Arc<Allocator>, max_objects: u64) ->
             .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER),
         vk_mem_erupt::MemoryUsage::CpuToGpu,
         Default::default(),
+        label!("RenderablesBuffer"),
     )
 }
 
@@ -828,6 +830,7 @@ pub fn create_indirect_buffer(allocator: Arc<Allocator>, size: u64) -> Allocated
         *buffer_info,
         vk_mem_erupt::MemoryUsage::GpuOnly,
         vk::MemoryPropertyFlags::empty(),
+        label!("IndirectBuffer"),
     )
 }
 
@@ -890,5 +893,6 @@ pub fn create_mesh_buffer(allocator: Arc<Allocator>, size: u64) -> AllocatedBuff
         *buffer_info,
         vk_mem_erupt::MemoryUsage::CpuToGpu,
         Default::default(),
+        label!("MeshBuffer"),
     )
 }

@@ -4,15 +4,16 @@ use sdl2::event::Event;
 use std::sync::Arc;
 
 use crate::{
-    handles::{Pipeline, PipelineDesc, ShaderModule},
+    buffer::AllocatedBuffer,
+    handles::{Allocator, Pipeline, PipelineDesc, ShaderModule},
     image::{AllocatedImage, ImageLoader, Texture},
-    mesh::{Mesh, MeshBounds, SubAllocatedBuffer, VertexInfoDescription},
+    mesh::{Mesh, MeshBounds, VertexInfoDescription},
     utils::{
-        create_full_view_port, create_pipeline_color_blend_attachment_state,
-        depth_stencil_create_info, input_assembly_create_info, multisampling_state_create_info,
-        pipeline_shader_stage_create_info, rasterization_state_create_info,
+        create_full_view_port, depth_stencil_create_info, input_assembly_create_info,
+        multisampling_state_create_info, pipeline_shader_stage_create_info,
+        rasterization_state_create_info,
     },
-    GpuDataRenderable, Meshes, RenderPipeline, Renderable,
+    GpuDataRenderable, RenderPipeline, Renderable,
 };
 
 enum KeyOrEvent {
@@ -139,9 +140,12 @@ pub struct EruptEgui {
     pipeline: usize,
     last_mesh: Vec<Renderable>,
     font_texture_version: u64,
+    buffers: Vec<Arc<AllocatedBuffer>>,
+    frame: usize,
+    texture: Option<usize>,
 }
 impl EruptEgui {
-    pub fn new(app: &mut crate::App) -> Self {
+    pub fn new(app: &mut crate::App, frames_in_flight: usize) -> Self {
         let vert_shader =
             ShaderModule::load(app.device().clone(), "./shaders/egui.vert.spv").unwrap();
         let frag_shader =
@@ -198,12 +202,29 @@ impl EruptEgui {
                 pipeline,
             }
         }));
+        let buffer_info = vk::BufferCreateInfoBuilder::new()
+            .size(2u64.pow(12))
+            .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER);
+        let buffers = (0..frames_in_flight)
+            .map(|_| {
+                Arc::new(AllocatedBuffer::new(
+                    app.allocator.clone(),
+                    *buffer_info,
+                    vk_mem_erupt::MemoryUsage::CpuToGpu,
+                    Default::default(),
+                    label!("EguiVertexIndexBuffer"),
+                ))
+            })
+            .collect();
         Self {
             ctx: egui::CtxRef::default(),
             raw_input: Self::default_input(),
             pipeline,
             last_mesh: Vec::new(),
             font_texture_version: 0,
+            buffers,
+            frame: 0,
+            texture: None,
         }
     }
     fn default_input() -> egui::RawInput {
@@ -224,7 +245,7 @@ impl EruptEgui {
         }
     }
     fn upload_font_texture(&mut self, image_loader: &ImageLoader, texture: Arc<egui::Texture>) {
-        /* let data = texture
+        let data = texture
             .pixels
             .iter()
             .flat_map(|r| [*r; 4])
@@ -233,12 +254,10 @@ impl EruptEgui {
         let height = texture.height as u32;
         let image = AllocatedImage::load(image_loader, &data, width, height);
         let texture = Texture::new(image_loader.device.clone(), image);
-        dbg!("LOADED FONT TEXTURE"); */
     }
     pub fn run(
         &mut self,
-        vertex_buffer: &mut SubAllocatedBuffer,
-        meshes: &Meshes,
+        allocator: Arc<Allocator>,
         image_loader: &ImageLoader,
         width: f32,
         height: f32,
@@ -263,44 +282,72 @@ impl EruptEgui {
             return &self.last_mesh;
         }
         let clipped_meshes = self.ctx.tessellate(shapes);
-        self.last_mesh = self.draw(clipped_meshes, vertex_buffer, meshes);
+        self.last_mesh = self.draw(clipped_meshes, allocator);
         &self.last_mesh
     }
     fn draw(
         &mut self,
         clipped_meshes: Vec<egui::ClippedMesh>,
-        vertex_buffer: &mut SubAllocatedBuffer,
-        meshes: &Meshes,
+        allocator: Arc<Allocator>,
     ) -> Vec<Renderable> {
-        return Vec::new();
-        /* let meshes: Vec<Renderable> = clipped_meshes
-            .into_iter()
-            .map(|mesh| {
+        let l = self.buffers.len();
+        let buffer = &mut self.buffers[self.frame % l];
+        self.frame += 1;
+        let mut offset = 0;
+        'outer: loop {
+            let mut meshes = Vec::new();
+            for mesh in clipped_meshes.iter() {
                 let egui::ClippedMesh(rect, mesh) = mesh;
                 let texture = match mesh.texture_id {
-                    egui::TextureId::Egui => 0,
+                    egui::TextureId::Egui => self.texture.unwrap_or(0) as u32,
                     egui::TextureId::User(id) => id as u32,
                 };
                 let min = cgmath::Vector3::new(rect.min.x, rect.min.y, 0.0);
                 let max = cgmath::Vector3::new(rect.max.x, rect.max.y, 0.0);
-                //dbg!(mesh.vertices.len());
-                let mesh = Mesh::new_with_bounds(
+                let (mesh, size) = if let Some((mesh, size)) = Mesh::new_into_buffer(
                     &mesh.vertices,
                     &mesh.indices,
-                    vertex_buffer,
                     MeshBounds { max, min },
-                );
-                let mesh = meshes.register_mesh(mesh);
+                    buffer.clone(),
+                    offset,
+                ) {
+                    (mesh, size)
+                } else {
+                    let buffer_info = vk::BufferCreateInfoBuilder::new()
+                        .size(
+                            ((offset
+                                + mesh.vertices.len()
+                                    * std::mem::size_of::<egui::epaint::Vertex>()
+                                + mesh.indices.len() * std::mem::size_of::<u32>())
+                                * 2) as u64,
+                        )
+                        .usage(
+                            vk::BufferUsageFlags::VERTEX_BUFFER
+                                | vk::BufferUsageFlags::INDEX_BUFFER,
+                        );
+                    *buffer = Arc::new(AllocatedBuffer::new(
+                        allocator.clone(),
+                        *buffer_info,
+                        vk_mem_erupt::MemoryUsage::CpuToGpu,
+                        Default::default(),
+                        label!("EguiVertexIndexBuffer"),
+                    ));
+                    continue 'outer;
+                };
+                offset += size;
+                offset += std::mem::size_of::<egui::epaint::Vertex>()
+                    - offset % std::mem::size_of::<egui::epaint::Vertex>();
+                assert_eq!(offset % std::mem::size_of::<egui::epaint::Vertex>(), 0);
                 let mesh = Arc::new(mesh);
-                Renderable {
+                meshes.push(Renderable {
                     mesh,
                     pipeline: self.pipeline,
                     transform: cgmath::Matrix4::identity(),
                     texture,
-                }
-            })
-            .collect();
-        meshes */
+                });
+            }
+            break meshes;
+        }
     }
     fn update_modifiers(&mut self, keymod: &sdl2::keyboard::Mod) -> &egui::Modifiers {
         self.raw_input.modifiers = egui::Modifiers {

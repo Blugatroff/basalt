@@ -3,8 +3,7 @@ use crate::utils::immediate_submit;
 use crate::{handles::Allocator, AllocatedBuffer};
 use crate::{GpuDataRenderable, TransferContext};
 use erupt::vk;
-use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub struct VertexInfoDescription {
     pub bindings: Vec<vk::VertexInputBindingDescriptionBuilder<'static>>,
@@ -56,154 +55,6 @@ impl Vertex {
             attributes,
             flags,
         }
-    }
-}
-
-pub struct SubAllocatedBuffer {
-    buffer: Arc<AllocatedBuffer>,
-    size: u64,
-    transfer_context: Arc<TransferContext>,
-    device: Arc<Device>,
-    allocator: Arc<Allocator>,
-    holes: Arc<Mutex<Holes>>,
-    usage: vk::BufferUsageFlags,
-}
-
-impl std::ops::Deref for SubAllocatedBuffer {
-    type Target = Arc<AllocatedBuffer>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.buffer
-    }
-}
-
-pub struct BufferSubAllocation {
-    offset: u64,
-    pub aligned_offset: u64,
-    /// self.offset / std::mem::size_of::<T>() as u64
-    holes: Arc<Mutex<Holes>>,
-    pub type_size: usize,
-    size: u64,
-}
-
-impl std::fmt::Debug for BufferSubAllocation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BufferSubAllocation")
-            .field("offset", &self.offset)
-            .field("aligned_offset", &self.aligned_offset)
-            .field("size", &self.size)
-            .finish()
-    }
-}
-
-impl Drop for BufferSubAllocation {
-    fn drop(&mut self) {
-        self.holes
-            .lock()
-            .unwrap()
-            .deallocate(self.offset, self.size)
-    }
-}
-
-impl SubAllocatedBuffer {
-    pub fn new(
-        device: Arc<Device>,
-        allocator: Arc<Allocator>,
-        transfer_context: Arc<TransferContext>,
-        start_size: u64,
-        usage: vk::BufferUsageFlags,
-    ) -> Self {
-        let size = start_size;
-        let buffer_info = vk::BufferCreateInfoBuilder::new()
-            .size(size)
-            .usage(usage | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST);
-        let buffer = Arc::new(AllocatedBuffer::new(
-            allocator.clone(),
-            *buffer_info,
-            vk_mem_erupt::MemoryUsage::GpuOnly,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        ));
-        Self {
-            device,
-            buffer,
-            allocator,
-            transfer_context,
-            size,
-            holes: Arc::new(Mutex::new(Holes::new(0, size))),
-            usage,
-        }
-    }
-    pub fn resize(&mut self, new_size: u64) {
-        let mut new = Self::new(
-            self.device.clone(),
-            self.allocator.clone(),
-            self.transfer_context.clone(),
-            new_size,
-            self.usage,
-        );
-        immediate_submit(&self.device, &self.transfer_context, |cmd| unsafe {
-            self.device.cmd_copy_buffer(
-                cmd,
-                **self.buffer,
-                **new.buffer,
-                &[vk::BufferCopyBuilder::new()
-                    .dst_offset(0)
-                    .src_offset(0)
-                    .size(self.size)],
-            );
-        });
-        self.holes.lock().unwrap().expand(self.buffer.size);
-        new.holes = self.holes.clone();
-        std::mem::swap(self, &mut new);
-    }
-    pub fn insert<T>(&mut self, data: &[T]) -> BufferSubAllocation {
-        let size = (data.len() + 1) * std::mem::size_of::<T>();
-        let size = size as u64;
-        let alloc = self.holes.lock().unwrap().allocate(size);
-        if let Some(offset) = alloc {
-            let alignment_offset =
-                std::mem::size_of::<T>() - offset as usize % std::mem::size_of::<T>();
-            self.upload_data(offset + alignment_offset as u64, data);
-            let aligned_offset = offset + alignment_offset as u64;
-            assert_eq!(aligned_offset as usize % std::mem::size_of::<T>(), 0);
-            BufferSubAllocation {
-                offset,
-                aligned_offset,
-                holes: self.holes.clone(),
-                size,
-                type_size: std::mem::size_of::<T>(),
-            }
-        } else {
-            self.resize((self.size + size) / 2 * 3);
-            self.insert(data)
-        }
-    }
-    pub fn upload_data<T>(&self, offset: u64, data: &[T]) {
-        let data_size = std::mem::size_of_val(data) as u64;
-        let buffer_info = vk::BufferCreateInfoBuilder::new()
-            .size(data_size)
-            .usage(vk::BufferUsageFlags::TRANSFER_SRC);
-        let src_buffer = AllocatedBuffer::new(
-            self.allocator.clone(),
-            *buffer_info,
-            vk_mem_erupt::MemoryUsage::CpuToGpu,
-            Default::default(),
-        );
-        let ptr = src_buffer.map();
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut T, data.len()) }
-        src_buffer.unmap();
-        immediate_submit(&self.device, &self.transfer_context, |cmd| unsafe {
-            self.device.cmd_copy_buffer(
-                cmd,
-                *src_buffer,
-                **self.buffer,
-                &[vk::BufferCopyBuilder::new()
-                    .dst_offset(offset)
-                    .src_offset(0)
-                    .size(data_size)],
-            );
-        });
-        drop(src_buffer)
     }
 }
 
@@ -334,18 +185,21 @@ pub struct MeshBounds {
 
 pub struct Mesh {
     pub bounds: MeshBounds,
-    pub vertex_allocation: BufferSubAllocation,
-    pub index_allocation: BufferSubAllocation,
+    pub vertex_start: u32,
+    pub index_start: u32,
     pub vertex_count: u32,
     pub index_count: u32,
-    pub id: u32,
+    pub buffer: Arc<AllocatedBuffer>,
 }
 
 impl Mesh {
     pub fn new(
         vertices: &[Vertex],
         indices: &[u32],
-        vertex_buffer: &mut SubAllocatedBuffer,
+        allocator: Arc<Allocator>,
+        transfer_context: &TransferContext,
+        device: Arc<Device>,
+        host_visible: bool,
     ) -> Self {
         let mut bounds = MeshBounds {
             max: cgmath::Vector3::new(0.0, 0.0, 0.0),
@@ -361,28 +215,119 @@ impl Mesh {
             if p.y < bounds.min.y { bounds.min.y = p.y }
             if p.z < bounds.min.z { bounds.min.z = p.z }
         }
-        Self::new_with_bounds(vertices, indices, vertex_buffer, bounds)
+        Self::new_with_bounds(
+            vertices,
+            indices,
+            bounds,
+            allocator,
+            transfer_context,
+            device,
+            host_visible,
+        )
+    }
+    pub fn new_into_buffer<V>(
+        vertices: &[V],
+        indices: &[u32],
+        bounds: MeshBounds,
+        buffer: Arc<AllocatedBuffer>,
+        offset: usize,
+    ) -> Option<(Self, usize)> {
+        assert_eq!(offset % std::mem::size_of::<V>(), 0);
+        if (buffer.size as usize)
+            < offset
+                + vertices.len() * std::mem::size_of::<V>()
+                + indices.len() * std::mem::size_of::<u32>()
+        {
+            return None;
+        }
+        let ptr = unsafe { buffer.map().add(offset) };
+        unsafe {
+            std::ptr::copy_nonoverlapping(vertices.as_ptr(), ptr as *mut V, vertices.len());
+        }
+        unsafe {
+            let ptr = ptr.add(vertices.len() * std::mem::size_of::<V>()) as *mut u32;
+            std::ptr::copy_nonoverlapping(indices.as_ptr(), ptr, indices.len());
+        }
+        buffer.unmap();
+
+        Some((
+            Self {
+                bounds,
+                vertex_start: (offset / std::mem::size_of::<V>()) as u32,
+                index_start: ((offset + std::mem::size_of::<V>() * vertices.len())
+                    / std::mem::size_of::<u32>()) as u32,
+                vertex_count: vertices.len() as u32,
+                index_count: indices.len() as u32,
+                buffer,
+            },
+            vertices.len() * std::mem::size_of::<V>() + indices.len() * std::mem::size_of::<u32>(),
+        ))
     }
     pub fn new_with_bounds<V>(
         vertices: &[V],
         indices: &[u32],
-        vertex_buffer: &mut SubAllocatedBuffer,
         bounds: MeshBounds,
+        allocator: Arc<Allocator>,
+        transfer_context: &TransferContext,
+        device: Arc<Device>,
+        host_visible: bool,
     ) -> Self {
-        let vertex_allocation = vertex_buffer.insert(&vertices);
-        let index_allocation = vertex_buffer.insert(&indices);
-        Self {
-            bounds,
-            vertex_allocation,
-            index_allocation,
-            vertex_count: vertices.len() as u32,
-            index_count: indices.len() as u32,
-            id: 0,
+        let size =
+            std::mem::size_of::<V>() * vertices.len() + indices.len() * std::mem::size_of::<u32>();
+        let buffer_info = vk::BufferCreateInfoBuilder::new()
+            .usage(
+                vk::BufferUsageFlags::VERTEX_BUFFER
+                    | vk::BufferUsageFlags::INDEX_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_SRC,
+            )
+            .size(size as u64);
+        let buffer = Arc::new(AllocatedBuffer::new(
+            allocator.clone(),
+            *buffer_info,
+            vk_mem_erupt::MemoryUsage::CpuToGpu,
+            Default::default(),
+            label!("MeshStagingBuffer"),
+        ));
+        let (mut mesh, _) = Self::new_into_buffer(vertices, indices, bounds, buffer, 0).unwrap();
+        if host_visible {
+            return mesh;
         }
+
+        let buffer_info = vk::BufferCreateInfoBuilder::new()
+            .size(mesh.buffer.size)
+            .usage(
+                vk::BufferUsageFlags::VERTEX_BUFFER
+                    | vk::BufferUsageFlags::INDEX_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+            );
+        let device_buffer = AllocatedBuffer::new(
+            allocator.clone(),
+            *buffer_info,
+            vk_mem_erupt::MemoryUsage::GpuOnly,
+            Default::default(),
+            label!("MeshBuffer"),
+        );
+
+        immediate_submit(&device, transfer_context, |cmd| unsafe {
+            device.cmd_copy_buffer(
+                cmd,
+                **mesh.buffer,
+                *device_buffer,
+                &[vk::BufferCopyBuilder::new()
+                    .dst_offset(0)
+                    .src_offset(0)
+                    .size(mesh.buffer.size)],
+            )
+        });
+        mesh.buffer = Arc::new(device_buffer);
+        mesh
     }
     pub fn load<P: AsRef<std::path::Path> + std::fmt::Debug>(
-        vertex_buffer: &mut SubAllocatedBuffer,
+        allocator: Arc<Allocator>,
         path: P,
+        transfer_context: &TransferContext,
+        device: Arc<Device>,
+        host_visible: bool,
     ) -> Vec<Self> {
         let (models, _) = tobj::load_obj(
             &path,
@@ -424,7 +369,14 @@ impl Mesh {
                 })
                 .collect::<Vec<Vertex>>();
             let indices = &model.mesh.indices;
-            meshes.push(Self::new(&vertices, indices, vertex_buffer));
+            meshes.push(Self::new(
+                &vertices,
+                indices,
+                allocator.clone(),
+                transfer_context,
+                device.clone(),
+                host_visible,
+            ));
         }
         meshes
     }

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{
     buffer::AllocatedBuffer, descriptor_sets::DescriptorSet, handles::*, image::AllocatedImage,
 };
@@ -18,7 +16,7 @@ pub struct Frames {
     pub indirect_buffer_sets: Vec<DescriptorSet>,
     pub mesh_buffers: Vec<AllocatedBuffer>,
     pub mesh_sets: Vec<DescriptorSet>,
-    pub vertex_buffer_used: Vec<Option<Arc<AllocatedBuffer>>>,
+    pub cleanup: Vec<Option<Box<dyn FnOnce()>>>,
 }
 
 pub struct FrameData<'a> {
@@ -35,7 +33,7 @@ pub struct FrameData<'a> {
     pub indirect_buffer_set: &'a mut DescriptorSet,
     pub mesh_buffer: &'a mut AllocatedBuffer,
     pub mesh_set: &'a mut DescriptorSet,
-    pub vertex_buffer_used: &'a mut Option<Arc<AllocatedBuffer>>,
+    pub cleanup: &'a mut Option<Box<dyn FnOnce()>>,
 }
 
 impl Frames {
@@ -54,7 +52,7 @@ impl Frames {
             indirect_buffer_set: &mut self.indirect_buffer_sets[index],
             mesh_buffer: &mut self.mesh_buffers[index],
             mesh_set: &mut self.mesh_sets[index],
-            vertex_buffer_used: &mut self.vertex_buffer_used[index],
+            cleanup: &mut self.cleanup[index],
         }
     }
 }

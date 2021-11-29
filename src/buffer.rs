@@ -8,6 +8,8 @@ pub struct AllocatedBuffer {
     allocation: vk_mem_erupt::Allocation,
     allocator: Arc<Allocator>,
     pub size: u64,
+    usage: vk::BufferUsageFlags,
+    name: &'static str,
 }
 
 impl AllocatedBuffer {
@@ -16,6 +18,7 @@ impl AllocatedBuffer {
         buffer_info: vk::BufferCreateInfo,
         usage: vk_mem_erupt::MemoryUsage,
         required_memory_properties: vk::MemoryPropertyFlags,
+        name: &'static str,
     ) -> Self {
         let vmaalloc_info = vk_mem_erupt::AllocationCreateInfo {
             usage,
@@ -27,11 +30,14 @@ impl AllocatedBuffer {
             .create_buffer(&buffer_info, &vmaalloc_info)
             .unwrap();
         let size = buffer_info.size;
+        let usage = buffer_info.usage;
         Self {
             allocator,
             buffer,
             allocation,
             size,
+            name,
+            usage,
         }
     }
     pub fn map(&self) -> *const u8 {
@@ -51,7 +57,10 @@ impl std::ops::Deref for AllocatedBuffer {
 
 impl Drop for AllocatedBuffer {
     fn drop(&mut self) {
-        println!("DROPPED Buffer! {}", self.size,);
+        println!(
+            "DROPPED Buffer! {} {} {:?}",
+            self.name, self.size, self.usage
+        );
         self.allocator.destroy_buffer(self.buffer, &self.allocation);
     }
 }

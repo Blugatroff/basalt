@@ -101,11 +101,13 @@ impl AllocatedImage {
         let buffer_info = vk::BufferCreateInfoBuilder::new()
             .size(image_size as u64)
             .usage(vk::BufferUsageFlags::TRANSFER_SRC);
+
         let staging_buffer = AllocatedBuffer::new(
             image_loader.allocator.clone(),
             *buffer_info,
             vk_mem_erupt::MemoryUsage::CpuOnly,
             Default::default(),
+            label!("ImageStagingBuffer"),
         );
         let ptr = staging_buffer.map() as *mut _;
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, image_size as usize) };
