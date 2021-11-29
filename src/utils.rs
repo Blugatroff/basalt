@@ -9,7 +9,6 @@ use crate::{
     image::AllocatedImage,
     GlobalUniform, GpuSceneData, TransferContext, LAYER_KHRONOS_VALIDATION,
 };
-use egui::Output;
 use erupt::{cstr, vk, DeviceLoader, InstanceLoader};
 use std::{
     ffi::{c_void, CStr, CString},
@@ -81,10 +80,10 @@ pub fn multisampling_state_create_info<'a>() -> vk::PipelineMultisampleStateCrea
         .alpha_to_one_enable(false)
 }
 
-pub fn pipeline_shader_stage_create_info<'a>(
+pub fn pipeline_shader_stage_create_info(
     stage: vk::ShaderStageFlagBits,
-    shader_module: &'a ShaderModule,
-) -> vk::PipelineShaderStageCreateInfoBuilder<'a> {
+    shader_module: &ShaderModule,
+) -> vk::PipelineShaderStageCreateInfoBuilder {
     let mut info = vk::PipelineShaderStageCreateInfoBuilder::new()
         .stage(stage)
         .module(**shader_module);
@@ -94,7 +93,7 @@ pub fn pipeline_shader_stage_create_info<'a>(
 
 pub fn create_global_descriptor_set_layout(device: Arc<Device>) -> DescriptorSetLayout {
     DescriptorSetLayout::new(
-        device.clone(),
+        device,
         vec![
             DescriptorSetLayoutBinding {
                 binding: 0,
@@ -139,7 +138,7 @@ pub fn create_instance(
     needed_extensions.iter().copied().for_each(|mut v| loop {
         let c = unsafe { *v };
         if c == 0 {
-            print!("\n");
+            println!();
             break;
         }
         print!("{}", c as u8 as char);
@@ -201,7 +200,7 @@ pub fn create_uniform_buffer(
 
     (
         AllocatedBuffer::new(
-            allocator.clone(),
+            allocator,
             *vk::BufferCreateInfoBuilder::new()
                 .size(size)
                 .usage(vk::BufferUsageFlags::UNIFORM_BUFFER),
@@ -214,7 +213,7 @@ pub fn create_uniform_buffer(
     )
 }
 
-pub fn create_descriptor_sets<'a>(
+pub fn create_descriptor_sets(
     device: Arc<Device>,
     descriptor_set_manager: &mut DescriptorSetManager,
     global_layout: &DescriptorSetLayout,
@@ -327,8 +326,8 @@ pub fn create_device_and_queue(
     let mut device_info = vk::DeviceCreateInfoBuilder::new()
         .queue_create_infos(&queue_info)
         .enabled_features(&features)
-        .enabled_extension_names(&device_extensions)
-        .enabled_layer_names(&device_layers)
+        .enabled_extension_names(device_extensions)
+        .enabled_layer_names(device_layers)
         .build();
 
     /* let synchronization_2_feature =
@@ -344,7 +343,7 @@ pub fn create_device_and_queue(
     device_info.p_next = &indexing_features as *const _ as *const c_void;
 
     let device =
-        unsafe { DeviceLoader::new(&instance, physical_device, &device_info, None) }.unwrap();
+        unsafe { DeviceLoader::new(instance, physical_device, &device_info, None) }.unwrap();
     let device = Device::new(device);
     let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
     let transfer_queue = unsafe { device.get_device_queue(transfer_queue_family, 0) };
@@ -669,12 +668,11 @@ pub fn create_debug_messenger(
     messenger_info: &vk::DebugUtilsMessengerCreateInfoEXT,
     validation_layers: bool,
 ) -> vk::DebugUtilsMessengerEXT {
-    let messenger = if validation_layers {
-        unsafe { instance.create_debug_utils_messenger_ext(&messenger_info, None) }.unwrap()
+    if validation_layers {
+        unsafe { instance.create_debug_utils_messenger_ext(messenger_info, None) }.unwrap()
     } else {
         Default::default()
-    };
-    messenger
+    }
 }
 pub fn create_debug_messenger_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
     vk::DebugUtilsMessengerCreateInfoEXTBuilder::new()
@@ -695,7 +693,7 @@ pub fn create_debug_messenger_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
 pub fn create_renderables_buffer(allocator: Arc<Allocator>, max_objects: u64) -> AllocatedBuffer {
     let size = std::mem::size_of::<crate::GpuDataRenderable>() as u64 * max_objects;
     AllocatedBuffer::new(
-        allocator.clone(),
+        allocator,
         *vk::BufferCreateInfoBuilder::new()
             .size(size)
             .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER),
@@ -707,7 +705,7 @@ pub fn create_renderables_buffer(allocator: Arc<Allocator>, max_objects: u64) ->
 
 pub fn create_object_set_layout(device: Arc<Device>) -> DescriptorSetLayout {
     DescriptorSetLayout::new(
-        device.clone(),
+        device,
         vec![DescriptorSetLayoutBinding {
             binding: 0,
             count: 1,
@@ -745,7 +743,7 @@ where
             )
             .unwrap();
         device
-            .wait_for_fences(&[*transfer_context.fence], true, 1000_000_000_000)
+            .wait_for_fences(&[*transfer_context.fence], true, 1_000_000_000)
             .unwrap();
         device
             .reset_command_pool(*transfer_context.command_pool, None)
@@ -753,7 +751,7 @@ where
     }
 }
 
-pub fn create_textures_set_layout<'a>(
+pub fn create_textures_set_layout(
     device: &Arc<Device>,
     views_number: usize,
     sampler: &Sampler,
@@ -785,7 +783,7 @@ pub fn create_textures_set<'a>(
         p_descriptor_counts: descriptor_counts,
         ..Default::default()
     };
-    let textures_set = descriptor_set_manager.allocate(&set_layout, Some(&variable_info));
+    let textures_set = descriptor_set_manager.allocate(set_layout, Some(&variable_info));
     if view_number == 0 {
         return textures_set;
     }
@@ -841,7 +839,7 @@ pub fn create_indirect_buffer_set(
     indirect_buffer: &AllocatedBuffer,
     set_layout: &DescriptorSetLayout,
 ) -> DescriptorSet {
-    let set = descriptor_set_manager.allocate(&set_layout, None);
+    let set = descriptor_set_manager.allocate(set_layout, None);
 
     let write_buffer_info = vk::DescriptorBufferInfoBuilder::new()
         .buffer(**indirect_buffer)
@@ -867,7 +865,7 @@ pub fn create_mesh_buffer_set(
     buffer: &AllocatedBuffer,
     set_layout: &DescriptorSetLayout,
 ) -> DescriptorSet {
-    let set = descriptor_set_manager.allocate(&set_layout, None);
+    let set = descriptor_set_manager.allocate(set_layout, None);
     let write_buffer_info = vk::DescriptorBufferInfoBuilder::new()
         .buffer(**buffer)
         .range(buffer.size)
@@ -890,7 +888,7 @@ pub fn create_mesh_buffer(allocator: Arc<Allocator>, size: u64) -> AllocatedBuff
         .size(size)
         .usage(vk::BufferUsageFlags::STORAGE_BUFFER);
     AllocatedBuffer::new(
-        allocator.clone(),
+        allocator,
         *buffer_info,
         vk_mem_erupt::MemoryUsage::CpuToGpu,
         Default::default(),

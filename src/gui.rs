@@ -145,6 +145,7 @@ pub struct EruptEgui {
     frame: usize,
     texture: Option<Arc<Texture>>,
     sampler: Arc<Sampler>,
+    allocator: Arc<Allocator>,
 }
 impl EruptEgui {
     pub fn new(app: &mut crate::App, frames_in_flight: usize) -> Self {
@@ -204,19 +205,8 @@ impl EruptEgui {
                 pipeline,
             }
         }));
-        let buffer_info = vk::BufferCreateInfoBuilder::new()
-            .size(2u64.pow(12))
-            .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER);
         let buffers = (0..frames_in_flight)
-            .map(|_| {
-                Arc::new(AllocatedBuffer::new(
-                    app.allocator.clone(),
-                    *buffer_info,
-                    vk_mem_erupt::MemoryUsage::CpuToGpu,
-                    Default::default(),
-                    label!("EguiVertexIndexBuffer"),
-                ))
-            })
+            .map(|_| Arc::new(Self::create_buffer(app.allocator.clone())))
             .collect();
         let filter = vk::Filter::NEAREST;
         let address_mode = vk::SamplerAddressMode::REPEAT;
@@ -236,7 +226,25 @@ impl EruptEgui {
             frame: 0,
             texture: None,
             sampler,
+            allocator: app.allocator.clone(),
         }
+    }
+    fn create_buffer(allocator: Arc<Allocator>) -> AllocatedBuffer {
+        let buffer_info = vk::BufferCreateInfoBuilder::new()
+            .size(2u64.pow(12))
+            .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER);
+        AllocatedBuffer::new(
+            allocator,
+            *buffer_info,
+            vk_mem_erupt::MemoryUsage::CpuToGpu,
+            Default::default(),
+            label!("EguiVertexIndexBuffer"),
+        )
+    }
+    pub fn adjust_frames_in_flight(&mut self, frames_in_flight: usize) {
+        self.buffers.resize_with(frames_in_flight, || {
+            Arc::new(Self::create_buffer(self.allocator.clone()))
+        })
     }
     fn default_input() -> egui::RawInput {
         egui::RawInput {
@@ -285,10 +293,10 @@ impl EruptEgui {
         image_loader: &ImageLoader,
         descriptor_set_manager: &mut DescriptorSetManager,
         texture_set_layout: &DescriptorSetLayout,
-        width: f32,
-        height: f32,
+        window_size: (f32, f32),
         f: impl FnOnce(&egui::CtxRef),
     ) {
+        let (width, height) = window_size;
         self.raw_input.screen_rect = Some(egui::Rect {
             min: egui::pos2(0.0, 0.0),
             max: egui::pos2(width, height),

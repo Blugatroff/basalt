@@ -70,7 +70,7 @@ impl ShaderModule {
     pub fn new(device: Arc<Device>, spv: &[u8]) -> Self {
         assert!(spv.len() % 4 == 0);
         let code = unsafe { std::slice::from_raw_parts(spv.as_ptr() as *const u32, spv.len() / 4) };
-        let create_info = vk::ShaderModuleCreateInfoBuilder::new().code(&code);
+        let create_info = vk::ShaderModuleCreateInfoBuilder::new().code(code);
         let module = unsafe { device.create_shader_module(&create_info, None) }.unwrap();
         /* let reflect = spirv_reflect::ShaderModule::load_u32_data(code).unwrap();
         let descriptor_bindings = reflect.enumerate_descriptor_bindings(Some("main")).unwrap();
@@ -182,11 +182,7 @@ pub struct ComputePipeline {
     device: Arc<Device>,
 }
 impl ComputePipeline {
-    pub fn new<'a>(
-        device: Arc<Device>,
-        layout: &PipelineLayout,
-        shader_module: &ShaderModule,
-    ) -> Self {
+    pub fn new(device: Arc<Device>, layout: &PipelineLayout, shader_module: &ShaderModule) -> Self {
         let name = CString::new("main").unwrap();
         let shader_stage_create_info = vk::PipelineShaderStageCreateInfoBuilder::new()
             .module(**shader_module)
@@ -229,7 +225,7 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn new<'a>(device: Arc<Device>, pass: vk::RenderPass, desc: PipelineDesc<'a>) -> Self {
+    pub fn new(device: Arc<Device>, pass: vk::RenderPass, desc: PipelineDesc) -> Self {
         let viewports = &[desc.view_port.into_builder()];
         let scissors = &[desc.scissor];
         let viewport_state = vk::PipelineViewportStateCreateInfoBuilder::new()
@@ -250,7 +246,7 @@ impl Pipeline {
             .color_blend_state(&color_blend_state_create_info)
             .layout(desc.layout)
             .render_pass(pass)
-            .depth_stencil_state(&desc.depth_stencil)
+            .depth_stencil_state(desc.depth_stencil)
             .subpass(0);
 
         let pipeline =

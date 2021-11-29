@@ -37,7 +37,7 @@ pub struct FrameData<'a> {
 }
 
 impl Frames {
-    pub fn get<'a>(&'a mut self, index: usize) -> FrameData<'a> {
+    pub fn get(&mut self, index: usize) -> FrameData {
         FrameData {
             present_semaphore: &self.present_semaphores[index],
             render_fence: &self.render_fences[index],

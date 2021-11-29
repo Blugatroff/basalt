@@ -173,7 +173,6 @@ pub struct TransferContext {
 }
 
 pub struct App {
-    text: String,
     scene_data_offset: u64,
     global_uniform_offset: u64,
     graphics_queue_family: u32,
@@ -231,7 +230,7 @@ pub struct App {
     instance: Arc<Instance>,
     #[allow(dead_code)]
     entry: erupt::EntryLoader,
-    last_frame_times: std::collections::VecDeque<(f32, f32, f32)>,
+    last_frame_times: std::collections::VecDeque<(f32, f32, f32, f32)>,
 }
 
 fn create_sync_objects(
@@ -560,7 +559,6 @@ impl App {
             fence,
         });
         let show_fps = false;
-        let text = "HAllo".into();
         let egui = None;
         let image_loader = ImageLoader {
             device: device.clone(),
@@ -574,7 +572,6 @@ impl App {
             last_frame_times,
             mouse_captured,
             image_loader,
-            text,
             egui,
             mesh_set_layout,
             indirect_buffer_set_layout,
@@ -627,7 +624,8 @@ impl App {
             global_uniform_offset,
             texture_set_layout,
         };
-        let egui = EruptEgui::new(&mut app, 5);
+        let f = app.frames_in_flight;
+        let egui = EruptEgui::new(&mut app, f);
         app.egui = Some(egui);
         app
     }
@@ -680,6 +678,9 @@ impl App {
                 .free_command_buffers(*self.command_pool, &self.frames.command_buffers);
         };
         if num_frames_in_flight_changed {
+            if let Some(egui) = self.egui.as_mut() {
+                egui.adjust_frames_in_flight(self.frames_in_flight);
+            }
             let (render_fences, present_semaphores, render_semaphores) =
                 create_sync_objects(&self.device, frames_in_flight);
             self.frames.render_fences = render_fences;
@@ -824,8 +825,7 @@ impl App {
             &self.image_loader,
             &mut self.descriptor_set_manager,
             &self.texture_set_layout,
-            width as f32,
-            height as f32,
+            (width as f32, height as f32),
             |ctx| {
                 ctx.request_repaint();
                 egui::Window::new("TEST").show(ctx, |ui| {
@@ -833,21 +833,30 @@ impl App {
                         egui::plot::Plot::new(0)
                             .line(
                                 egui::plot::Line::new(egui::plot::Values::from_values_iter(
-                                    self.last_frame_times
-                                        .iter()
-                                        .map(|(t, v, _)| egui::plot::Value::new(*t, *v * 1000.0)),
+                                    self.last_frame_times.iter().map(|(t, v, _, _)| {
+                                        egui::plot::Value::new(*t, *v * 1000.0)
+                                    }),
                                 ))
                                 .color(egui::Color32::BLUE)
                                 .name("Frametime"),
                             )
                             .line(
                                 egui::plot::Line::new(egui::plot::Values::from_values_iter(
-                                    self.last_frame_times
-                                        .iter()
-                                        .map(|(t, _, v)| egui::plot::Value::new(*t, *v * 1000.0)),
+                                    self.last_frame_times.iter().map(|(t, _, v, _)| {
+                                        egui::plot::Value::new(*t, *v * 1000.0)
+                                    }),
                                 ))
                                 .color(egui::Color32::RED)
                                 .name("GPU-Wait"),
+                            )
+                            .line(
+                                egui::plot::Line::new(egui::plot::Values::from_values_iter(
+                                    self.last_frame_times.iter().map(|(t, _, _, v)| {
+                                        egui::plot::Value::new(*t, *v * 1000.0)
+                                    }),
+                                ))
+                                .color(egui::Color32::GREEN)
+                                .name("Prerender Processing"),
                             )
                             .legend(egui::plot::Legend::default())
                             .allow_drag(false)
@@ -891,22 +900,21 @@ impl App {
                     _ => {}
                 },
                 Event::KeyUp {
-                    keycode: Some(keycode),
+                    keycode: Some(sdl2::keyboard::Keycode::F),
                     ..
                 } => {
-                    if let sdl2::keyboard::Keycode::F = keycode {
-                        self.print_fps = false;
-                    }
+                    self.print_fps = false;
                 }
-                Event::Window { win_event, .. } => {
-                    if let sdl2::event::WindowEvent::Resized(w, h) = win_event {
-                        if self.opt.frames_in_flight > 2 {
-                            self.opt.frames_in_flight = 2;
-                        } else {
-                            self.opt.frames_in_flight = 3;
-                        }
-                        self.resize(w as u32, h as u32, self.opt.frames_in_flight, false);
+                Event::Window {
+                    win_event: sdl2::event::WindowEvent::Resized(w, h),
+                    ..
+                } => {
+                    if self.opt.frames_in_flight > 2 {
+                        self.opt.frames_in_flight = 2;
+                    } else {
+                        self.opt.frames_in_flight = 3;
                     }
+                    self.resize(w as u32, h as u32, self.opt.frames_in_flight, false);
                 }
                 _ => {}
             }
@@ -920,7 +928,6 @@ impl App {
         let time = self.start.elapsed().as_secs_f32();
         self.last_time = now;
         self.frame_number += 1;
-        self.ui();
         let (width, height) = self.window.size();
         self.camera
             .update(&self.input.make_controls(dt.as_secs_f32()));
@@ -935,17 +942,13 @@ impl App {
         self.global_uniform.time = self.start.elapsed().as_secs_f32();
         self.global_uniform.screen_width = width as f32;
         self.global_uniform.screen_height = height as f32;
-        let egui_renderables = self.egui.as_ref().unwrap().renderables();
-        let renderables_len = renderables.len() + egui_renderables.len();
-        let renderables = renderables.iter().chain(egui_renderables);
-        self.global_uniform.renderables_count = renderables_len as u32;
         unsafe {
             if self.must_resize {
                 return;
             }
             let frame_index = self.frame_number as usize % self.frames_in_flight;
             let frame = self.frames.get(frame_index);
-            let wait_start = std::time::Instant::now();
+            let gpu_wait_start = std::time::Instant::now();
             let res = self
                 .device
                 .wait_for_fences(&[**frame.render_fence], true, 5000000000);
@@ -953,19 +956,20 @@ impl App {
                 dbg!(res.raw, "TIMEOUT");
                 std::process::exit(-1);
             }
+            let gpu_wait = gpu_wait_start.elapsed().as_secs_f32();
             self.device.reset_fences(&[**frame.render_fence]).unwrap();
+            drop(frame);
+            self.ui();
+            let egui_renderables = self.egui.as_ref().unwrap().renderables();
+            let renderables_len = renderables.len() + egui_renderables.len();
+            let renderables = renderables.iter().chain(egui_renderables);
+            self.global_uniform.renderables_count = renderables_len as u32;
+            let frame = self.frames.get(frame_index);
             if let Some(f) = frame.cleanup.take() {
                 f();
             }
-            self.last_frame_times.push_back((
-                time,
-                dt.as_secs_f32(),
-                wait_start.elapsed().as_secs_f32(),
-            ));
-            while self.last_frame_times.len() > 1000 {
-                self.last_frame_times.pop_front();
-            }
 
+            let pre_render_processing_start = std::time::Instant::now();
             if renderables_len * std::mem::size_of::<GpuDataRenderable>()
                 > frame.renderables_buffer.size as usize
             {
@@ -1071,8 +1075,17 @@ impl App {
                 vertex_start: u32,
                 custom_set: &'a DescriptorSet,
             }
-            let renderables_len = renderables.clone().count();
-            let mesh_buffer_min_size = renderables_len * std::mem::size_of::<GpuMesh>();
+            let meshes_len = renderables
+                .clone()
+                .fold((0, std::ptr::null()), |(mut i, last), r| {
+                    let this_mesh = Arc::as_ptr(&r.mesh);
+                    if this_mesh != last {
+                        i += 1;
+                    }
+                    (i, this_mesh)
+                })
+                .0;
+            let mesh_buffer_min_size = meshes_len * std::mem::size_of::<GpuMesh>();
             if mesh_buffer_min_size > frame.mesh_buffer.size as usize {
                 *frame.mesh_buffer =
                     create_mesh_buffer(self.allocator.clone(), mesh_buffer_min_size as u64 / 2 * 3);
@@ -1084,33 +1097,36 @@ impl App {
                 );
             }
             let ptr = frame.mesh_buffer.map();
-            let slice = std::slice::from_raw_parts_mut(ptr as *mut GpuMesh, renderables_len);
-            for (i, o) in renderables.clone().enumerate() {
-                slice[i] = GpuMesh {
-                    max: o.mesh.bounds.max,
-                    first_index: o.mesh.index_start,
-                    min: o.mesh.bounds.min,
-                    index_count: o.mesh.index_count,
-                    vertex_offset: o.mesh.vertex_start as i32,
-                    _padding_0: Default::default(),
-                    _padding_1: Default::default(),
-                    _padding_2: Default::default(),
-                };
-            }
-            frame.mesh_buffer.unmap();
+            let mesh_slice = std::slice::from_raw_parts_mut(ptr as *mut GpuMesh, meshes_len);
             let mut last_buffer = std::ptr::null();
             let mut last_custom_set = std::ptr::null();
             let mut meshes = Vec::new();
-            let mut textures = Vec::new();
+            let mut custom_sets = Vec::new();
+            let mut mesh_index = 0;
             for (i, renderable) in renderables.clone().enumerate() {
-                meshes.push(renderable.mesh.clone());
-                textures.push(renderable.custom_set.clone());
                 let this_pipeline = renderable.pipeline;
                 let this_mesh = &*renderable.mesh;
                 let this_buffer = Arc::as_ptr(&renderable.mesh.buffer);
                 let this_custom_set = &*renderable.custom_set;
                 if this_pipeline != last_pipeline || this_buffer != last_buffer {
                     indirect_draw += 1;
+                }
+                if this_custom_set as *const DescriptorSet != last_custom_set {
+                    custom_sets.push(renderable.custom_set.clone());
+                }
+                if this_mesh as *const Mesh != last_mesh {
+                    meshes.push(renderable.mesh.clone());
+                    mesh_slice[mesh_index] = GpuMesh {
+                        max: this_mesh.bounds.max,
+                        first_index: this_mesh.index_start,
+                        min: this_mesh.bounds.min,
+                        index_count: this_mesh.index_count,
+                        vertex_offset: this_mesh.vertex_start as i32,
+                        _padding_0: Default::default(),
+                        _padding_1: Default::default(),
+                        _padding_2: Default::default(),
+                    };
+                    mesh_index += 1;
                 }
                 let ptr = objects_ptr.add(i);
                 (*ptr).custom_id = 0;
@@ -1139,16 +1155,17 @@ impl App {
                 (*ptr).transform = renderable.transform;
                 (*ptr).custom_id = renderable.custom_id;
                 (*ptr).uncullable = if renderable.uncullable { 1 } else { 0 };
-                (*ptr).mesh = i as u32;
+                (*ptr).mesh = mesh_index as u32 - 1;
                 let instancing_batch = instancing_batches.len() as u32 - 1;
                 (*ptr).draw = indirect_draw - 1;
                 (*ptr).batch = instancing_batch;
                 (*ptr).redirect = i as u32;
                 instancing_batches.last_mut().unwrap().instance_count += 1;
             }
+            frame.mesh_buffer.unmap();
             *frame.cleanup = Some(Box::new(|| {
                 drop(meshes);
-                drop(textures);
+                drop(custom_sets);
             }) as Box<dyn FnOnce()>);
             frame.renderables_buffer.unmap();
             struct IndirectDraw<'a> {
@@ -1181,7 +1198,15 @@ impl App {
                     unreachable!();
                 }
             }
-
+            self.last_frame_times.push_back((
+                time,
+                dt.as_secs_f32(),
+                gpu_wait,
+                pre_render_processing_start.elapsed().as_secs_f32(),
+            ));
+            while self.last_frame_times.len() > 1000 {
+                self.last_frame_times.pop_front();
+            }
             let cmd = *frame.command_buffer;
             self.device.reset_command_buffer(cmd, None).unwrap();
             let begin_info = vk::CommandBufferBeginInfoBuilder::new()

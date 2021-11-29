@@ -41,15 +41,15 @@ pub struct DescriptorSetLayoutBinding {
     pub immutable_samplers: Option<Vec<vk::Sampler>>,
 }
 
-impl<'a> Into<vk::DescriptorSetLayoutBindingBuilder<'a>> for &'a DescriptorSetLayoutBinding {
-    fn into(self) -> vk::DescriptorSetLayoutBindingBuilder<'a> {
+impl<'a> From<&'a DescriptorSetLayoutBinding> for vk::DescriptorSetLayoutBindingBuilder<'a> {
+    fn from(val: &'a DescriptorSetLayoutBinding) -> Self {
         let mut builder = vk::DescriptorSetLayoutBindingBuilder::new()
-            .binding(self.binding)
-            .descriptor_type(self.ty)
-            .stage_flags(self.stage_flags)
-            .descriptor_count(dbg!(self.count));
-        if let Some(samplers) = self.immutable_samplers.as_ref() {
-            builder = builder.immutable_samplers(&samplers);
+            .binding(val.binding)
+            .descriptor_type(val.ty)
+            .stage_flags(val.stage_flags)
+            .descriptor_count(dbg!(val.count));
+        if let Some(samplers) = val.immutable_samplers.as_ref() {
+            builder = builder.immutable_samplers(samplers);
         }
         builder
     }
@@ -108,7 +108,7 @@ impl Drop for DescriptorPool {
     }
 }
 impl DescriptorPool {
-    pub fn new<'a>(
+    pub fn new(
         device: Arc<Device>,
         max_sets: u32,
         pool_sizes: Vec<(vk::DescriptorType, u32)>,
@@ -169,15 +169,12 @@ impl DescriptorPool {
             if self
                 .pool_sizes
                 .iter()
-                .find(|(ty, free)| {
-                    binding.ty == *ty && free.load(Ordering::SeqCst) >= binding.count
-                })
-                .is_some()
+                .any(|(ty, free)| binding.ty == *ty && free.load(Ordering::SeqCst) >= binding.count)
             {
                 return true;
             }
         }
-        return false;
+        false
     }
     pub fn allocate_set(&self, bindings: &[DescriptorSetLayoutBinding]) {
         assert!(self.check_for_space(bindings));
