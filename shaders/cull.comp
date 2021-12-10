@@ -3,13 +3,13 @@ layout (local_size_x = 256) in;
 
 struct Object {
     mat4 transform;
+    uint batch;
     uint draw;
     uint firstInstance;
     uint uncullable;
     uint unused_3;
     uint texture;
     uint mesh;
-    uint batch;
     uint redirect;
 };
 
@@ -90,8 +90,8 @@ void main() {
     if (visible) {
         uint firstInstance = objectBuffer.objects[batch].firstInstance;
         uint objectIndex = atomicAdd(indirectBuffer.commands[batch].instanceCount, 1);
-        atomicAdd(indirectBuffer.commands[indirectDraw].batchCount, 1);
         if (objectIndex == 0) {
+            atomicAdd(indirectBuffer.commands[indirectDraw].batchCount, 1);
             indirectBuffer.commands[batch].firstInstance = firstInstance;
             indirectBuffer.commands[batch].firstIndex = mesh.firstIndex;
             indirectBuffer.commands[batch].indexCount = mesh.indexCount;

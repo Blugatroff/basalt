@@ -95,12 +95,12 @@ impl Mesh {
             host_visible,
         )
     }
+    #[rustfmt::skip]
     fn calculate_bounds(vertices: &[Vertex]) -> MeshBounds {
         let mut bounds = MeshBounds {
             max: cgmath::Vector3::new(0.0, 0.0, 0.0),
             min: cgmath::Vector3::new(0.0, 0.0, 0.0),
         };
-        #[rustfmt::skip]
         for vertex in vertices {
             let p = &vertex.position;
             if p.x > bounds.max.x { bounds.max.x = p.x }
@@ -210,7 +210,6 @@ impl Mesh {
             label!("CombineMeshesStagingBuffer"),
         ));
         let mut offset = 0;
-        println!("HALLO");
         immediate_submit(&device, transfer_context, |cmd| unsafe {
             for mesh in meshes.iter_mut() {
                 offset = round_to(offset, mesh.vertex_type_size as u64);
@@ -226,7 +225,6 @@ impl Mesh {
                 offset += mesh.buffer.size;
             }
         });
-        println!("HALLO");
         let device_local_buffer = Arc::new(staging_buffer.copy_to_device_local(
             device,
             transfer_context,
@@ -234,8 +232,6 @@ impl Mesh {
                 | vk::BufferUsageFlags::INDEX_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_SRC,
         ));
-        println!("HALLO");
-
         for mesh in meshes {
             mesh.buffer = Arc::clone(&device_local_buffer);
         }

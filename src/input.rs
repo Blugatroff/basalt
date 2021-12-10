@@ -8,9 +8,14 @@ pub struct Input {
     right: bool,
     up: bool,
     down: bool,
+    look_up: bool,
+    look_down: bool,
+    look_left: bool,
+    look_right: bool,
     look_up_down: f32,
     look_left_right: f32,
     speed: f32,
+    look_speed: f32,
 }
 
 impl Input {
@@ -20,8 +25,14 @@ impl Input {
             sdl2::keyboard::Keycode::S => self.backward = v,
             sdl2::keyboard::Keycode::A => self.left = v,
             sdl2::keyboard::Keycode::D => self.right = v,
+            sdl2::keyboard::Keycode::J => self.look_left = v,
+            sdl2::keyboard::Keycode::L => self.look_right = v,
+            sdl2::keyboard::Keycode::K => self.look_down = v,
+            sdl2::keyboard::Keycode::I => self.look_up = v,
             sdl2::keyboard::Keycode::Space => self.up = v,
             sdl2::keyboard::Keycode::LCtrl => self.down = v,
+            sdl2::keyboard::Keycode::O => self.speed *= 1.1,
+            sdl2::keyboard::Keycode::P => self.speed *= 0.9,
             _ => {}
         }
     }
@@ -30,8 +41,8 @@ impl Input {
             forwards_backwards: self.forward as i32 as f32 - self.backward as i32 as f32,
             right_left: self.right as i32 as f32 - self.left as i32 as f32,
             up_down: self.up as i32 as f32 - self.down as i32 as f32,
-            look_up_down: -self.look_up_down * 0.005,
-            look_right_left: -self.look_left_right * 0.005,
+            look_up_down: -self.look_up_down * 0.005 + (self.look_up as i32 as f32 * self.look_speed * dt) - (self.look_down as i32 as f32 * self.look_speed * dt),
+            look_right_left: -self.look_left_right * 0.005 + (self.look_left as i32 as f32 * self.look_speed * dt) - (self.look_right as i32 as f32 * self.look_speed * dt),
             speed: self.speed * dt,
         };
         self.look_up_down = 0.0;
@@ -72,6 +83,11 @@ impl Default for Input {
             down: Default::default(),
             look_up_down: Default::default(),
             look_left_right: Default::default(),
+            look_up: false,
+            look_down: false,
+            look_right: false,
+            look_left: false,
+            look_speed: 2.0
         }
     }
 }

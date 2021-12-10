@@ -15,13 +15,13 @@ layout(set = 0, binding = 0) uniform GlobalUniform {
  
 struct Object {
   mat4 transform;
+  uint batch;
   uint draw;
   uint firstInstance;
   uint uncullable;
   uint unused_3;
   uint texture;
   uint mesh;
-  uint batch;
   uint redirect;
 };
 
