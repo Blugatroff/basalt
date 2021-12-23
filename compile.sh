@@ -12,7 +12,5 @@ compile $base/shaders/rgb_triangle.frag
 compile $base/shaders/mesh.vert
 compile $base/shaders/mesh.frag
 
-compile $base/shaders/cull.comp
-
 compile $base/shaders/egui.vert
 compile $base/shaders/egui.frag

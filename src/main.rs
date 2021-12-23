@@ -69,8 +69,6 @@ struct Opt {
     #[structopt(short, long)]
     /// render wireframe of meshes
     wireframe: bool,
-    #[structopt(short, long)]
-    indirect: bool,
     /// how many frames are rendered to at the same time
     frames_in_flight: usize,
     test: usize,
@@ -104,18 +102,9 @@ pub struct GlobalUniform {
     screen_height: f32,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug)]
-struct GpuSceneData {
-    fog_color: cgmath::Vector4<f32>,
-    fog_distance: cgmath::Vector4<f32>,
-    ambient_color: cgmath::Vector4<f32>,
-    sunlight_direction: cgmath::Vector4<f32>,
-    sunlight_color: cgmath::Vector4<f32>,
-}
-
 struct PipelineCreationParams<'a> {
     set_layouts: Vec<&'a DescriptorSetLayout>,
+    texture_set_layout: Arc<DescriptorSetLayout>,
     device: &'a Arc<Device>,
     width: u32,
     height: u32,
@@ -173,16 +162,11 @@ pub struct TransferContext {
 }
 
 pub struct App {
-    scene_data_offset: u64,
-    global_uniform_offset: u64,
+    #[allow(dead_code)]
     graphics_queue_family: u32,
     opt: Opt,
     mouse_captured: bool,
-    gpu_scene_data: GpuSceneData,
-    compute_pipeline: ComputePipeline,
-    compute_pipeline_layout: PipelineLayout,
     input: Input,
-    textures_set_layout: DescriptorSetLayout,
     camera: first_person_camera::FirstPersonCamera,
     start: std::time::Instant,
     #[allow(dead_code)]
@@ -192,14 +176,16 @@ pub struct App {
     #[allow(dead_code)]
     sdl: sdl2::Sdl,
     mesh_set_layout: DescriptorSetLayout,
-    must_resize: bool,
     sampler: Arc<Sampler>,
     event_pump: EventPump,
     window: sdl2::video::Window,
+    width: u32,
+    height: u32,
     vsync: bool,
     graphics_queue: vk::Queue,
     messenger: Option<vk::DebugUtilsMessengerEXT>,
     descriptor_set_manager: DescriptorSetManager,
+    texture_set_layout: Arc<DescriptorSetLayout>,
     command_pool: CommandPool,
     frame_buffers: Vec<Framebuffer>,
     swapchain_images: Vec<vk::Image>,
@@ -209,7 +195,8 @@ pub struct App {
     frames: Frames,
     uniform_buffer: AllocatedBuffer,
     frames_in_flight: usize,
-    texture_set_layout: DescriptorSetLayout,
+    last_frames_in_flight: usize,
+    last_vsync: bool,
     frame_number: u64,
     image_loader: ImageLoader,
     #[allow(dead_code)]
@@ -219,13 +206,10 @@ pub struct App {
     materials: Vec<Option<(RenderPipeline, MaterialLoadFn)>>,
     global_uniform: GlobalUniform,
     global_set_layout: DescriptorSetLayout,
-    object_set_layout: DescriptorSetLayout,
-    indirect_buffer_set_layout: DescriptorSetLayout,
     surface: Surface,
     egui_on: bool,
     print_fps: bool,
     format: vk::SurfaceFormatKHR,
-    textures: Vec<Arc<Texture>>,
     physical_device: vk::PhysicalDevice,
     allocator: Arc<Allocator>,
     device: Arc<Device>,
@@ -359,9 +343,8 @@ impl App {
 
         let last_time = std::time::Instant::now();
         let frame_number = 0;
-        let must_resize = false;
         let start = std::time::Instant::now();
-        let (uniform_buffer, global_uniform_offset, scene_data_offset) = create_uniform_buffer(
+        let uniform_buffer = create_uniform_buffer(
             allocator.clone(),
             frames_in_flight as u64,
             &physical_device_properties.limits,
@@ -382,7 +365,6 @@ impl App {
             .map(|size| create_renderables_buffer(allocator.clone(), *size as u64))
             .collect::<Vec<_>>();
         let global_set_layout = create_global_descriptor_set_layout(device.clone());
-        let object_set_layout = create_object_set_layout(device.clone());
         let filter = vk::Filter::NEAREST;
         let address_mode = vk::SamplerAddressMode::REPEAT;
         let sampler = vk::SamplerCreateInfoBuilder::new()
@@ -392,8 +374,7 @@ impl App {
             .address_mode_w(address_mode);
         let sampler = Sampler::new(device.clone(), &sampler);
         let mut descriptor_set_manager = DescriptorSetManager::new(device.clone());
-        let textures_set_layout = create_textures_set_layout(&device, 1, &sampler);
-        let texture_set_layout = DescriptorSetLayout::new(
+        let texture_set_layout = Arc::new(DescriptorSetLayout::new(
             device.clone(),
             vec![DescriptorSetLayoutBinding {
                 binding: 0,
@@ -403,48 +384,19 @@ impl App {
                 immutable_samplers: None,
             }],
             None,
-        );
-        let textures: Vec<Arc<Texture>> = Vec::new();
-        let views = textures.iter().map(|i| &*i.view);
+        ));
         let descriptor_sets = (0..frames_in_flight)
             .map(|i| {
-                let (uniform_set, object_set) = create_descriptor_sets(
+                create_descriptor_sets(
                     device.clone(),
                     &mut descriptor_set_manager,
                     &global_set_layout,
-                    &object_set_layout,
                     &uniform_buffer,
                     &renderables_buffers[i],
                     max_objects[i],
-                );
-                let textures_set = create_textures_set(
-                    &device,
-                    &mut descriptor_set_manager,
-                    views.clone(),
-                    &textures_set_layout,
-                );
-                (uniform_set, object_set, textures_set)
-            })
-            .collect::<Vec<_>>();
-        let indirect_buffers = (0..frames_in_flight)
-            .map(|_| {
-                create_indirect_buffer(
-                    allocator.clone(),
-                    std::mem::size_of::<IndirectDrawCommand>() as u64 * 4,
                 )
             })
             .collect::<Vec<_>>();
-        let indirect_buffer_set_layout = DescriptorSetLayout::new(
-            device.clone(),
-            vec![DescriptorSetLayoutBinding {
-                binding: 0,
-                count: 1,
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage_flags: vk::ShaderStageFlags::COMPUTE,
-                immutable_samplers: None,
-            }],
-            None,
-        );
         let mesh_buffers = (0..frames_in_flight)
             .map(|_| create_mesh_buffer(allocator.clone(), std::mem::size_of::<GpuMesh>() as u64))
             .collect::<Vec<_>>();
@@ -471,32 +423,6 @@ impl App {
                 )
             })
             .collect::<Vec<_>>();
-        let set_layouts = &[
-            *object_set_layout,
-            *indirect_buffer_set_layout,
-            *global_set_layout,
-            *mesh_set_layout,
-        ];
-        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfoBuilder::new()
-            .set_layouts(set_layouts)
-            .flags(vk::PipelineLayoutCreateFlags::empty());
-        let compute_pipeline_layout =
-            PipelineLayout::new(device.clone(), &pipeline_layout_create_info);
-        let compute_shader = ShaderModule::load(device.clone(), "./shaders/cull.comp.spv").unwrap();
-        let compute_pipeline =
-            ComputePipeline::new(device.clone(), &compute_pipeline_layout, &compute_shader);
-
-        let indirect_buffer_sets = indirect_buffers
-            .iter()
-            .map(|b| {
-                create_indirect_buffer_set(
-                    &device,
-                    &mut descriptor_set_manager,
-                    b,
-                    &indirect_buffer_set_layout,
-                )
-            })
-            .collect::<Vec<_>>();
         let cleanup = (0..frames_in_flight).map(|_| None).collect();
         let frames = Frames {
             present_semaphores,
@@ -508,8 +434,6 @@ impl App {
             descriptor_sets,
             renderables_buffers,
             max_objects,
-            indirect_buffers,
-            indirect_buffer_sets,
             mesh_buffers,
             mesh_sets,
             cleanup,
@@ -523,19 +447,14 @@ impl App {
         let input = Input::default();
         window.set_grab(true);
         sdl.mouse().set_relative_mouse_mode(true);
-        let gpu_scene_data = GpuSceneData {
-            fog_color: cgmath::Vector4::new(1.0, 1.0, 1.0, 1.0),
-            fog_distance: cgmath::Vector4::new(100.0, 0.0, 0.0, 0.0),
-            ambient_color: cgmath::Vector4::new(0.1, 0.1, 0.1, 1.0),
-            sunlight_direction: cgmath::Vector4::new(0.0, 1.0, 0.0, 0.0),
-            sunlight_color: cgmath::Vector4::new(1.0, 1.0, 0.5, 1.0),
-        };
         let materials = materials
             .into_iter()
             .map(|f| {
+                std::thread::sleep(std::time::Duration::from_millis(50000));
                 Some((
                     f(PipelineCreationParams {
                         set_layouts: vec![&global_set_layout],
+                        texture_set_layout: texture_set_layout.clone(),
                         device: &device,
                         width,
                         height,
@@ -570,27 +489,28 @@ impl App {
         let sampler = Arc::new(sampler);
         let mouse_captured = true;
         let last_frame_times = VecDeque::new();
-        let vsync = true;
+        let vsync = false;
         let egui_on = false;
+        let last_frames_in_flight = frames_in_flight;
+        let last_vsync = vsync;
         let mut app = Self {
+            texture_set_layout,
             vsync,
+            last_vsync,
+            width,
+            height,
+            last_frames_in_flight,
             last_frame_times,
             mouse_captured,
             image_loader,
             egui,
             mesh_set_layout,
-            indirect_buffer_set_layout,
             graphics_queue_family,
             egui_on,
-            compute_pipeline,
-            compute_pipeline_layout,
-            textures,
-            textures_set_layout,
             sampler,
             descriptor_set_manager,
-            object_set_layout,
+            global_set_layout,
             frames_in_flight,
-            gpu_scene_data,
             materials,
             opt,
             camera,
@@ -601,7 +521,6 @@ impl App {
             sdl,
             format,
             physical_device,
-            must_resize,
             event_pump,
             window,
             instance,
@@ -622,13 +541,9 @@ impl App {
             last_time,
             allocator,
             supported_present_modes,
-            global_set_layout,
             input,
             physical_device_properties,
             uniform_buffer,
-            scene_data_offset,
-            global_uniform_offset,
-            texture_set_layout,
         };
         let f = app.frames_in_flight;
         let egui = EruptEgui::new(&mut app, f);
@@ -641,11 +556,8 @@ impl App {
     fn pipeline_creation_params(&self) -> PipelineCreationParams {
         let (width, height) = self.window.size();
         PipelineCreationParams {
-            set_layouts: vec![
-                &self.global_set_layout,
-                &self.object_set_layout,
-                &self.texture_set_layout,
-            ],
+            set_layouts: vec![&self.global_set_layout],
+            texture_set_layout: self.texture_set_layout.clone(),
             device: &self.device,
             width,
             height,
@@ -662,8 +574,23 @@ impl App {
         }
         self.materials.len() - 1
     }
-    fn resize(&mut self, w: u32, h: u32, frames_in_flight: usize) {
+    /// returns whether a resize was necessary
+    fn resize(&mut self) -> bool {
+        let (w, h) = self.window.size();
+        let num_frames_in_flight_changed = self.last_frames_in_flight != self.frames_in_flight;
+        if w == self.width
+            && h == self.height
+            && !num_frames_in_flight_changed
+            && self.last_vsync == self.vsync
+        {
+            return false;
+        }
+
         dbg!(self.vsync);
+        self.width = w;
+        self.height = h;
+        self.last_frames_in_flight = self.frames_in_flight;
+        self.last_vsync = self.vsync;
         if self.vsync {
             self.present_mode = vk::PresentModeKHR::FIFO_KHR;
         } else {
@@ -676,9 +603,8 @@ impl App {
                 vk::PresentModeKHR::IMMEDIATE_KHR
             };
         }
-        let num_frames_in_flight_changed = frames_in_flight != self.frames_in_flight;
-        self.frames_in_flight = frames_in_flight;
         println!("RESIZE RESIZE RESIZE RESIZE RESIZE");
+        dbg!(num_frames_in_flight_changed);
         unsafe {
             self.device.device_wait_idle().unwrap();
             self.device
@@ -689,20 +615,17 @@ impl App {
                 egui.adjust_frames_in_flight(self.frames_in_flight);
             }
             let (render_fences, present_semaphores, render_semaphores) =
-                create_sync_objects(&self.device, frames_in_flight);
+                create_sync_objects(&self.device, self.frames_in_flight);
             self.frames.render_fences = render_fences;
             self.frames.present_semaphores = present_semaphores;
             self.frames.render_semaphores = render_semaphores;
 
-            let (uniform_buffer, global_uniform_offset, scene_data_offset) = create_uniform_buffer(
+            let uniform_buffer = create_uniform_buffer(
                 self.allocator.clone(),
                 self.frames_in_flight as u64,
                 &self.physical_device_properties.limits,
             );
             self.uniform_buffer = uniform_buffer;
-            self.global_uniform_offset = global_uniform_offset;
-            self.scene_data_offset = scene_data_offset;
-            self.global_uniform_offset = 0;
             let max_objects = self.frames.max_objects.get(0).copied().unwrap_or(8);
             self.frames
                 .max_objects
@@ -716,54 +639,21 @@ impl App {
                 .cleanup
                 .resize_with(self.frames_in_flight, || None);
             //self.frames.descriptor_sets.clear();
-            let views = self.textures.iter().map(|t| &*t.view);
-            let mut textures_sets = self.frames.descriptor_sets.drain(..).map(|(_, _, a)| a);
             let descriptor_sets = (0..self.frames_in_flight)
                 .zip(&mut self.frames.renderables_buffers)
                 .zip(&self.frames.max_objects)
                 .map(|((_, object_buffer), max_objects)| {
-                    let (uniform_set, object_set) = create_descriptor_sets(
+                    create_descriptor_sets(
                         self.device.clone(),
                         &mut self.descriptor_set_manager,
                         &self.global_set_layout,
-                        &self.object_set_layout,
                         &self.uniform_buffer,
                         object_buffer,
                         *max_objects,
-                    );
-                    let textures_set = textures_sets.next().unwrap_or_else(|| {
-                        create_textures_set(
-                            &self.device,
-                            &mut self.descriptor_set_manager,
-                            views.clone(),
-                            &self.textures_set_layout,
-                        )
-                    });
-                    (uniform_set, object_set, textures_set)
-                })
-                .collect::<Vec<_>>();
-            drop(textures_sets);
-            self.frames.descriptor_sets = descriptor_sets;
-            let size = self.frames.indirect_buffers[0].size;
-            self.frames
-                .indirect_buffers
-                .resize_with(self.frames_in_flight, || {
-                    create_indirect_buffer(self.allocator.clone(), size)
-                });
-            self.frames.indirect_buffer_sets = self
-                .frames
-                .indirect_buffers
-                .iter()
-                .map(|b| {
-                    create_indirect_buffer_set(
-                        &self.device,
-                        &mut self.descriptor_set_manager,
-                        b,
-                        &self.indirect_buffer_set_layout,
                     )
                 })
-                .collect();
-
+                .collect::<Vec<_>>();
+            self.frames.descriptor_sets = descriptor_sets;
             let size = self.frames.mesh_buffers[0].size;
             self.frames
                 .mesh_buffers
@@ -798,7 +688,7 @@ impl App {
         self.swapchain_image_views = swapchain_image_views;
         self.render_pass = create_render_pass(self.device.clone(), self.format);
         self.frames.depth_images =
-            create_depth_images(self.allocator.clone(), w, h, frames_in_flight);
+            create_depth_images(self.allocator.clone(), w, h, self.frames_in_flight);
         self.frames.depth_image_views =
             create_depth_image_views(self.device.clone(), &self.frames.depth_images);
         self.frame_buffers = create_framebuffers(
@@ -810,9 +700,12 @@ impl App {
             &self.frames.depth_image_views,
         );
         self.reload_pipelines();
-        self.frames.command_buffers =
-            create_command_buffers(&self.device, &self.command_pool, frames_in_flight as u32);
-        self.must_resize = false;
+        self.frames.command_buffers = create_command_buffers(
+            &self.device,
+            &self.command_pool,
+            self.frames_in_flight as u32,
+        );
+        true
     }
     fn reload_pipelines(&mut self) {
         for i in 0..self.materials.len() {
@@ -826,8 +719,6 @@ impl App {
         }
     }
     fn ui(&mut self) {
-        let last_vsync = self.vsync;
-        let last_frames_in_flight = self.frames_in_flight;
         let (width, height) = self.window.size();
         self.egui.as_mut().unwrap().run(
             self.allocator.clone(),
@@ -837,10 +728,16 @@ impl App {
             (width as f32, height as f32),
             |ctx| {
                 ctx.request_repaint();
-                egui::Window::new("TEST").show(ctx, |ui| {
-                    ui.checkbox(&mut self.opt.indirect, "Indirect");
+                egui::Window::new("Debug Window").show(ctx, |ui| {
+                    let dt = self
+                        .last_frame_times
+                        .get(self.last_frame_times.len() - 1)
+                        .map(|t| t.1)
+                        .unwrap_or(0.0);
+                    ui.label(format!("{}ms", dt * 1000.0));
+                    ui.label(format!("{}fps", 1.0 / dt));
                     ui.checkbox(&mut self.vsync, "Vsync");
-                    ui.add(egui::Slider::new(&mut self.frames_in_flight, 1..=5));
+                    ui.add(egui::Slider::new(&mut self.frames_in_flight, 1..=15));
                     ui.add({
                         egui::plot::Plot::new(0)
                             .line(
@@ -877,8 +774,6 @@ impl App {
                 });
             },
         );
-        self.must_resize |= self.vsync != last_vsync;
-        self.must_resize |= self.frames_in_flight != last_frames_in_flight;
     }
     fn update(&mut self, renderables: &[Renderable]) -> bool {
         for event in self.event_pump.poll_iter().collect::<Vec<_>>().into_iter() {
@@ -900,11 +795,8 @@ impl App {
                     sdl2::keyboard::Keycode::F => {
                         self.print_fps = true;
                     }
-                    sdl2::keyboard::Keycode::U => {
-                        self.opt.indirect = !self.opt.indirect;
-                    }
                     sdl2::keyboard::Keycode::V => {
-                        self.vsync = !self.vsync;
+                        self.vsync = true;
                     }
                     sdl2::keyboard::Keycode::E => {
                         self.mouse_captured = !self.mouse_captured;
@@ -925,16 +817,8 @@ impl App {
                 } => {
                     self.print_fps = false;
                 }
-                Event::Window {
-                    win_event: sdl2::event::WindowEvent::Resized(w, h),
-                    ..
-                } => {
-                    if self.opt.frames_in_flight > 2 {
-                        self.opt.frames_in_flight = 2;
-                    } else {
-                        self.opt.frames_in_flight = 3;
-                    }
-                    self.resize(w as u32, h as u32, self.opt.frames_in_flight);
+                Event::Window { .. } => {
+                    self.resize();
                 }
                 _ => {}
             }
@@ -963,8 +847,7 @@ impl App {
         self.global_uniform.screen_width = width as f32;
         self.global_uniform.screen_height = height as f32;
         unsafe {
-            if self.must_resize {
-                self.resize(width, height, self.frames_in_flight);
+            if self.resize() {
                 return;
             }
             let frame_index = self.frame_number as usize % self.frames_in_flight;
@@ -977,16 +860,17 @@ impl App {
                 dbg!(res.raw, "TIMEOUT");
                 std::process::exit(-1);
             }
-            let gpu_wait = gpu_wait_start.elapsed().as_secs_f32();
-            self.device.reset_fences(&[**frame.render_fence]).unwrap();
-            drop(frame);
-            if self.must_resize {
-                self.resize(width, height, self.frames_in_flight);
-                return;
-            }
             if self.egui_on {
                 self.ui();
             }
+            if self.resize() {
+                return;
+            }
+            let frame = self.frames.get(frame_index);
+            let gpu_wait = gpu_wait_start.elapsed().as_secs_f32();
+            self.device.reset_fences(&[**frame.render_fence]).unwrap();
+            drop(frame);
+
             let egui_renderables = self.egui.as_ref().unwrap().renderables();
             let renderables_len = renderables.len() + egui_renderables.len();
             let renderables = renderables.iter();
@@ -1009,39 +893,13 @@ impl App {
                 *frame.max_objects = (renderables_len / 2 * 3).max(16);
                 *frame.renderables_buffer =
                     create_renderables_buffer(self.allocator.clone(), *frame.max_objects as u64);
-                frame.descriptor_sets.1 = {
-                    let object_set = self
-                        .descriptor_set_manager
-                        .allocate(&self.object_set_layout, None);
-                    let object_params_info = vk::DescriptorBufferInfoBuilder::new()
-                        .buffer(**frame.renderables_buffer)
-                        .range(
-                            (std::mem::size_of::<GpuDataRenderable>() * *frame.max_objects) as u64,
-                        );
-                    let object_params_info = &[object_params_info];
-                    let set_write_object_info = vk::WriteDescriptorSetBuilder::new()
-                        .dst_binding(0)
-                        .dst_set(*object_set)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(object_params_info);
-                    self.device
-                        .update_descriptor_sets(&[set_write_object_info], &[]);
-                    object_set
-                };
-            }
-            if renderables_len * std::mem::size_of::<IndirectDrawCommand>()
-                > frame.indirect_buffer.size as usize
-            {
-                *frame.indirect_buffer = create_indirect_buffer(
-                    self.allocator.clone(),
-                    std::mem::size_of::<IndirectDrawCommand>() as u64 * renderables_len as u64 / 2
-                        * 3,
-                );
-                *frame.indirect_buffer_set = create_indirect_buffer_set(
-                    &self.device,
+                *frame.descriptor_set = create_descriptor_sets(
+                    self.device.clone(),
                     &mut self.descriptor_set_manager,
-                    frame.indirect_buffer,
-                    &self.indirect_buffer_set_layout,
+                    &self.global_set_layout,
+                    &self.uniform_buffer,
+                    &*frame.renderables_buffer,
+                    *frame.max_objects,
                 );
             }
             let swapchain_image_index = {
@@ -1054,7 +912,6 @@ impl App {
                 if let Some(value) = res.value {
                     value as usize
                 } else {
-                    self.must_resize = true;
                     return;
                 }
             };
@@ -1068,27 +925,15 @@ impl App {
             let (width, height) = self.window.size();
 
             let ptr = self.uniform_buffer.map();
-            let global_uniform_offset = self.global_uniform_offset as usize
-                + pad_uniform_buffer_size(
-                    &self.physical_device_properties.limits,
-                    std::mem::size_of::<GlobalUniform>() as u64,
-                ) as usize
-                    * frame_index;
+            let global_uniform_offset = pad_uniform_buffer_size(
+                &self.physical_device_properties.limits,
+                std::mem::size_of::<GlobalUniform>() as u64,
+            ) as usize
+                * frame_index;
             let current_global_uniform_ptr = ptr.add(global_uniform_offset);
-            let scene_data_offset = self.scene_data_offset as usize
-                + pad_uniform_buffer_size(
-                    &self.physical_device_properties.limits,
-                    std::mem::size_of::<GpuSceneData>() as u64,
-                ) as usize
-                    * frame_index;
-            let current_scene_data_ptr = ptr.add(scene_data_offset);
             std::ptr::write(
                 current_global_uniform_ptr as *mut GlobalUniform,
                 self.global_uniform,
-            );
-            std::ptr::write(
-                current_scene_data_ptr as *mut GpuSceneData,
-                self.gpu_scene_data,
             );
             self.uniform_buffer.unmap();
             let objects_ptr = frame.renderables_buffer.map() as *mut GpuDataRenderable;
@@ -1134,8 +979,6 @@ impl App {
             let mut meshes = Vec::new();
             let mut custom_sets = Vec::new();
             let mut mesh_index = 0;
-            dbg!(self.opt.indirect);
-            dbg!(self.vsync);
             let renderables_slice = std::slice::from_raw_parts_mut(
                 objects_ptr as *mut GpuDataRenderable,
                 renderables_len,
@@ -1199,41 +1042,11 @@ impl App {
                 instancing_batches.last_mut().unwrap().instance_count += 1;
             }
             frame.mesh_buffer.unmap();
+            frame.renderables_buffer.unmap();
             *frame.cleanup = Some(Box::new(|| {
                 drop(meshes);
                 drop(custom_sets);
             }) as Box<dyn FnOnce()>);
-            frame.renderables_buffer.unmap();
-            struct IndirectDraw<'a> {
-                draw_count: usize,
-                first_draw: usize,
-                pipeline: &'a RenderPipeline,
-                vertex_index_buffer: &'a AllocatedBuffer,
-                custom_set: &'a DescriptorSet,
-            }
-            let mut indirect_draws = Vec::new();
-            let mut last_pipeline = std::ptr::null::<RenderPipeline>();
-            let mut last_buffer = std::ptr::null();
-            let instancing_batches_len = instancing_batches.len();
-            for (instance_draw, batch) in instancing_batches.iter().enumerate() {
-                let this_pipeline = batch.pipeline as *const RenderPipeline;
-                let this_buffer = batch.index_vertex_buffer as *const AllocatedBuffer;
-                if this_pipeline != last_pipeline || this_buffer != last_buffer {
-                    indirect_draws.push(IndirectDraw {
-                        draw_count: 1,
-                        first_draw: instance_draw,
-                        pipeline: batch.pipeline,
-                        vertex_index_buffer: batch.index_vertex_buffer,
-                        custom_set: batch.custom_set,
-                    });
-                    last_pipeline = this_pipeline;
-                    last_buffer = this_buffer;
-                } else if let Some(indirect_draw) = indirect_draws.last_mut() {
-                    indirect_draw.draw_count += 1;
-                } else {
-                    unreachable!();
-                }
-            }
             self.last_frame_times.push_back((
                 time,
                 dt.as_secs_f32(),
@@ -1248,53 +1061,6 @@ impl App {
             let begin_info = vk::CommandBufferBeginInfoBuilder::new()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             self.device.begin_command_buffer(cmd, &begin_info).unwrap();
-            if true || self.opt.indirect {
-                self.device.cmd_fill_buffer(
-                    cmd,
-                    **frame.indirect_buffer,
-                    0,
-                    (std::mem::size_of::<IndirectDrawCommand>() * instancing_batches_len) as u64,
-                    0,
-                );
-                self.device.cmd_bind_pipeline(
-                    cmd,
-                    vk::PipelineBindPoint::COMPUTE,
-                    *self.compute_pipeline,
-                );
-                self.device.cmd_bind_descriptor_sets(
-                    cmd,
-                    vk::PipelineBindPoint::COMPUTE,
-                    *self.compute_pipeline_layout,
-                    0,
-                    &[
-                        *frame.descriptor_sets.1,
-                        **frame.indirect_buffer_set,
-                        *frame.descriptor_sets.0,
-                        **frame.mesh_set,
-                    ],
-                    &[global_uniform_offset as u32, scene_data_offset as u32],
-                );
-                let group_count_x = (renderables_len as u32 / 256) + 1;
-                self.device.cmd_dispatch(cmd, group_count_x, 1, 1);
-
-                let buffer_memory_barrier = vk::BufferMemoryBarrierBuilder::new()
-                    .buffer(**frame.indirect_buffer)
-                    .size(frame.indirect_buffer.size)
-                    .dst_queue_family_index(self.graphics_queue_family)
-                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::MEMORY_READ);
-                let src_stage_mask = vk::PipelineStageFlags::COMPUTE_SHADER;
-                let dst_stage_mask = vk::PipelineStageFlags::DRAW_INDIRECT;
-                self.device.cmd_pipeline_barrier(
-                    cmd,
-                    Some(src_stage_mask),
-                    Some(dst_stage_mask),
-                    None,
-                    &[],
-                    &[buffer_memory_barrier],
-                    &[],
-                );
-            }
             let clear_values = &[
                 clear_value,
                 vk::ClearValue {
@@ -1314,96 +1080,46 @@ impl App {
                 .framebuffer(*self.frame_buffers[swapchain_image_index]);
             self.device
                 .cmd_begin_render_pass(cmd, &rp_begin_info, vk::SubpassContents::INLINE);
-            if self.opt.indirect {
-                for (i, indirect_draw) in indirect_draws.into_iter().enumerate() {
-                    self.device.cmd_bind_vertex_buffers(
-                        cmd,
-                        0,
-                        &[
-                            **indirect_draw.vertex_index_buffer,
-                            **frame.renderables_buffer,
-                        ],
-                        &[0, 0],
-                    );
-                    self.device.cmd_bind_index_buffer(
-                        cmd,
-                        **indirect_draw.vertex_index_buffer,
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-                    self.device.cmd_bind_pipeline(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        *indirect_draw.pipeline.pipeline,
-                    );
-                    self.device.cmd_bind_descriptor_sets(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        *indirect_draw.pipeline.pipeline_layout,
-                        0,
-                        &[
-                            *frame.descriptor_sets.0,
-                            *frame.descriptor_sets.1,
-                            **indirect_draw.custom_set,
-                        ],
-                        &[global_uniform_offset as u32, scene_data_offset as u32],
-                    );
-                    self.device.cmd_draw_indexed_indirect_count(
-                        cmd,
-                        **frame.indirect_buffer,
-                        indirect_draw.first_draw as u64
-                            * std::mem::size_of::<IndirectDrawCommand>() as u64,
-                        **frame.indirect_buffer,
-                        (i * std::mem::size_of::<IndirectDrawCommand>()
-                            + std::mem::size_of::<u32>() * 5) as u64,
-                        indirect_draw.draw_count as u32,
-                        std::mem::size_of::<IndirectDrawCommand>() as u32,
-                    );
-                }
-            } else {
-                let mut first_instance = 0;
-                for batch in &instancing_batches {
-                    self.device.cmd_bind_vertex_buffers(
-                        cmd,
-                        0,
-                        &[**batch.index_vertex_buffer, **frame.renderables_buffer],
-                        &[0, 0],
-                    );
-                    self.device.cmd_bind_index_buffer(
-                        cmd,
-                        **batch.index_vertex_buffer,
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-                    self.device.cmd_bind_pipeline(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        *batch.pipeline.pipeline,
-                    );
+            let mut first_instance = 0;
+            //std::thread::sleep(std::time::Duration::from_millis(50));
+            //dbg!(&instancing_batches);
+            for batch in &instancing_batches {
+                self.device.cmd_bind_vertex_buffers(
+                    cmd,
+                    0,
+                    &[**batch.index_vertex_buffer, **frame.renderables_buffer],
+                    &[0, 0],
+                );
+                self.device.cmd_bind_index_buffer(
+                    cmd,
+                    **batch.index_vertex_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_bind_pipeline(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    *batch.pipeline.pipeline,
+                );
 
-                    self.device.cmd_bind_descriptor_sets(
-                        cmd,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        *batch.pipeline.pipeline_layout,
-                        0,
-                        &[
-                            *frame.descriptor_sets.0,
-                            *frame.descriptor_sets.1,
-                            **batch.custom_set,
-                        ],
-                        &[global_uniform_offset as u32, scene_data_offset as u32],
-                    );
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    *batch.pipeline.pipeline_layout,
+                    0,
+                    &[**frame.descriptor_set, **batch.custom_set],
+                    &[global_uniform_offset as u32],
+                );
 
-                    self.device.cmd_draw_indexed(
-                        cmd,
-                        batch.index_count,
-                        batch.instance_count,
-                        batch.index_start,
-                        batch.vertex_start as i32,
-                        first_instance,
-                    );
-                    first_instance += batch.instance_count;
-                }
+                self.device.cmd_draw_indexed(
+                    cmd,
+                    batch.index_count,
+                    batch.instance_count,
+                    batch.index_start,
+                    batch.vertex_start as i32,
+                    first_instance,
+                );
+                first_instance += batch.instance_count;
             }
             self.device.cmd_end_render_pass(cmd);
             self.device.end_command_buffer(cmd).unwrap();
@@ -1489,7 +1205,7 @@ fn main() {
     ];
     let rgb_pipeline = app.register_pipeline(rgb_pipeline(app.device.clone()));
     let mesh_pipeline = app.register_pipeline(mesh_pipeline(app.device().clone()));
-    let triangle_mesh = Mesh::new(
+    let mut triangle_mesh = Mesh::new(
         &vertices,
         &[0, 1, 2, 2, 1, 0],
         app.allocator.clone(),
@@ -1497,21 +1213,19 @@ fn main() {
         app.device.clone(),
         true,
     );
-    let suzanne_mesh = Mesh::load(
+    let mut suzanne_mesh = Mesh::load(
         app.allocator.clone(),
         "./assets/suzanne.obj",
         &app.transfer_context,
         app.device.clone(),
     )
     .swap_remove(0);
-    let mut meshes = vec![suzanne_mesh, triangle_mesh];
     Mesh::combine_meshes(
-        &mut meshes,
+        [&mut suzanne_mesh, &mut triangle_mesh],
         app.allocator.clone(),
         &app.transfer_context,
         app.device.clone(),
     );
-    let [suzanne_mesh, triangle_mesh]: [Mesh; 2] = meshes.try_into().unwrap();
     let image = AllocatedImage::open(&app.image_loader, "./assets/lost_empire-RGBA.png");
     let mut renderables = Vec::new();
     let texture = Arc::new(Texture::new(
@@ -1542,29 +1256,20 @@ fn main() {
         }
     }
 
-    let mut empire_meshes = Mesh::load(
+    let empire_meshes = Mesh::load(
         app.allocator.clone(),
         "./assets/lost_empire.obj",
         &app.transfer_context,
         app.device.clone(),
     );
-    Mesh::combine_meshes(
-        &mut empire_meshes,
-        app.allocator.clone(),
-        &app.transfer_context,
-        app.device.clone(),
-    );
-    let empire = empire_meshes
-        .into_iter()
-        .map(|mesh| Renderable {
-            mesh: Arc::new(mesh),
-            pipeline: mesh_pipeline,
-            transform: cgmath::Matrix4::identity(),
-            custom_set: texture.set.clone(),
-            custom_id: 0,
-            uncullable: false,
-        })
-        .collect::<Vec<Renderable>>();
+    let empire = empire_meshes.into_iter().map(|mesh| Renderable {
+        mesh: Arc::new(mesh),
+        pipeline: mesh_pipeline,
+        transform: cgmath::Matrix4::identity(),
+        custom_set: texture.set.clone(),
+        custom_id: 0,
+        uncullable: false,
+    });
 
     let mut triangle = Renderable {
         mesh: Arc::new(triangle_mesh),
@@ -1581,10 +1286,9 @@ fn main() {
         * cgmath::Matrix4::from_scale(4.0);
     renderables.push(triangle);
 
-    for (i, mut empire) in empire.into_iter().enumerate().take(2) {
-        empire.transform =
-            cgmath::Matrix4::from_translation(cgmath::Vector3::new(0.0, i as f32, 0.0));
-        //renderables.push(empire);
+    for mut empire in empire.into_iter() {
+        empire.transform = cgmath::Matrix4::from_translation(cgmath::Vector3::new(0.0, 0.0, 0.0));
+        renderables.push(empire);
     }
     let mut last_time = std::time::Instant::now();
     loop {
@@ -1598,14 +1302,16 @@ fn main() {
     }
 }
 fn mesh_pipeline(device: Arc<Device>) -> MaterialLoadFn {
+    dbg!("bla");
     let vert_shader = ShaderModule::load(device.clone(), "./shaders/mesh.vert.spv").unwrap();
     let frag_shader = ShaderModule::load(device, "./shaders/mesh.frag.spv").unwrap();
     Box::new(move |args| {
-        let set_layouts = args
+        let mut set_layouts = args
             .set_layouts
             .iter()
             .map(|l| ***l)
             .collect::<Vec<vk::DescriptorSetLayout>>();
+        set_layouts.push(**args.texture_set_layout);
         let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
             .set_layouts(&set_layouts)
             .push_constant_ranges(&[]);
@@ -1622,7 +1328,6 @@ fn mesh_pipeline(device: Arc<Device>) -> MaterialLoadFn {
                 pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::VERTEX, &vert_shader),
                 pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::FRAGMENT, &frag_shader),
             ];
-
             let color_blend_attachment = create_pipeline_color_blend_attachment_state();
             /* let color_blend_attachment = color_blend_attachment
             .blend_enable(true)
@@ -1677,11 +1382,12 @@ fn rgb_pipeline(device: Arc<Device>) -> MaterialLoadFn {
             pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::VERTEX, &vert_shader),
             pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::FRAGMENT, &frag_shader),
         ];
-        let set_layouts = args
+        let mut set_layouts = args
             .set_layouts
             .into_iter()
             .map(|l| **l)
             .collect::<Vec<vk::DescriptorSetLayout>>();
+        set_layouts.push(**args.texture_set_layout);
         let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
             .set_layouts(&set_layouts)
             .push_constant_ranges(&[]);

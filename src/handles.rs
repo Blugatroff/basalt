@@ -182,6 +182,7 @@ pub struct ComputePipeline {
     device: Arc<Device>,
 }
 impl ComputePipeline {
+    #[allow(dead_code)]
     pub fn new(device: Arc<Device>, layout: &PipelineLayout, shader_module: &ShaderModule) -> Self {
         let name = CString::new("main").unwrap();
         let shader_stage_create_info = vk::PipelineShaderStageCreateInfoBuilder::new()

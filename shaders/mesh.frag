@@ -14,21 +14,13 @@ layout(set = 0, binding = 0) uniform GlobalUniform {
   float time;
 } globalUniform;
 
-layout(set = 0, binding = 1) uniform SceneParams {
-  vec4 fogColor;
-  vec4 fogDistances;
-  vec4 ambientColor;
-  vec4 sunlightDirection;
-  vec4 sunlightColor;
-} sceneParams;
-
-layout(set = 2, binding = 0) uniform sampler2D textures[];
+layout(set = 1, binding = 0) uniform sampler2D tex;
 
 void main() {
   vec3 lightDir = vec3(0, 1, 0);
   float diffuse = dot(vNormal, lightDir) * 0.5 + 0.5;
   diffuse = diffuse * 0.5 + 0.5;
-  vec4 color = texture(textures[texId], vUv);
+  vec4 color = texture(tex, vUv);
   //color = vec4(1.0);
   if (color.w == 0.0) {
     discard;

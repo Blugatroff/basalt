@@ -1,3 +1,5 @@
+use crate::handles;
+use crate::App;
 use cgmath::SquareMatrix;
 use erupt::vk;
 use sdl2::event::Event;
@@ -148,7 +150,7 @@ pub struct EruptEgui {
     allocator: Arc<Allocator>,
 }
 impl EruptEgui {
-    pub fn new(app: &mut crate::App, frames_in_flight: usize) -> Self {
+    pub fn new(app: &mut App, frames_in_flight: usize) -> Self {
         let vert_shader =
             ShaderModule::load(app.device().clone(), "./shaders/egui.vert.spv").unwrap();
         let frag_shader =
@@ -161,16 +163,17 @@ impl EruptEgui {
                 pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::VERTEX, &vert_shader),
                 pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::FRAGMENT, &frag_shader),
             ];
-            let set_layouts = params
+            let mut set_layouts = params
                 .set_layouts
                 .into_iter()
                 .map(|l| **l)
                 .collect::<Vec<vk::DescriptorSetLayout>>();
+            set_layouts.push(**params.texture_set_layout);
             let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
                 .set_layouts(&set_layouts)
                 .push_constant_ranges(&[]);
             let pipeline_layout =
-                crate::handles::PipelineLayout::new(params.device.clone(), &pipeline_layout_info);
+                handles::PipelineLayout::new(params.device.clone(), &pipeline_layout_info);
             let view_port = create_full_view_port(width, height);
             let color_blend_attachment = vk::PipelineColorBlendAttachmentStateBuilder::new()
                 .color_write_mask(vk::ColorComponentFlags::all())

@@ -190,12 +190,27 @@ impl Mesh {
         ));
         mesh
     }
-    pub fn combine_meshes(
-        meshes: &mut Vec<Self>,
+    pub fn combine_meshes<'a>(
+        meshes: impl IntoIterator<Item = &'a mut Self>,
         allocator: Arc<Allocator>,
         transfer_context: &TransferContext,
         device: Arc<Device>,
     ) {
+        let mut meshes = meshes.into_iter().collect::<Vec<&mut Self>>();
+        if meshes.is_empty() {
+            return;
+        }
+        let bptr = Arc::as_ptr(&meshes[0].buffer);
+        let mut already_combined = true;
+        for m in &meshes {
+            if Arc::as_ptr(&m.buffer) != bptr {
+                already_combined = false;
+                break;
+            }
+        }
+        if already_combined {
+            return;
+        }
         let staging_buffer_size = meshes.iter().fold(0, |size, m| {
             round_to(size, m.vertex_type_size as u64) + m.buffer.size
         });
@@ -232,7 +247,7 @@ impl Mesh {
                 | vk::BufferUsageFlags::INDEX_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_SRC,
         ));
-        for mesh in meshes {
+        for mesh in &mut meshes {
             mesh.buffer = Arc::clone(&device_local_buffer);
         }
     }
@@ -293,7 +308,7 @@ impl Mesh {
                 )
             })
             .collect::<Vec<_>>();
-        Self::combine_meshes(&mut meshes, allocator, transfer_context, device);
+        Self::combine_meshes(meshes.iter_mut(), allocator, transfer_context, device);
         meshes
     }
 }

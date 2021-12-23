@@ -7,7 +7,7 @@ use crate::{
     },
     handles::*,
     image::AllocatedImage,
-    GlobalUniform, GpuSceneData, TransferContext, LAYER_KHRONOS_VALIDATION,
+    GlobalUniform, TransferContext, LAYER_KHRONOS_VALIDATION,
 };
 use erupt::{cstr, vk, DeviceLoader, InstanceLoader};
 use std::{
@@ -105,8 +105,8 @@ pub fn create_global_descriptor_set_layout(device: Arc<Device>) -> DescriptorSet
             DescriptorSetLayoutBinding {
                 binding: 1,
                 count: 1,
-                ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
                 immutable_samplers: None,
             },
         ],
@@ -188,81 +188,56 @@ pub fn create_uniform_buffer(
     allocator: Arc<Allocator>,
     frames_in_flight: u64,
     limits: &vk::PhysicalDeviceLimits,
-) -> (AllocatedBuffer, u64, u64) {
-    let scene_data_offset =
-        pad_uniform_buffer_size(limits, std::mem::size_of::<GlobalUniform>() as u64)
-            * frames_in_flight;
-    let global_uniform_offset = 0;
+) -> AllocatedBuffer {
     let size = pad_uniform_buffer_size(limits, std::mem::size_of::<GlobalUniform>() as u64)
-        * frames_in_flight
-        + pad_uniform_buffer_size(limits, std::mem::size_of::<GpuSceneData>() as u64)
-            * frames_in_flight;
+        * frames_in_flight;
 
-    (
-        AllocatedBuffer::new(
-            allocator,
-            *vk::BufferCreateInfoBuilder::new()
-                .size(size)
-                .usage(vk::BufferUsageFlags::UNIFORM_BUFFER),
-            vk_mem_erupt::MemoryUsage::CpuToGpu,
-            Default::default(),
-            label!("UniformBuffer"),
-        ),
-        global_uniform_offset,
-        scene_data_offset,
+    AllocatedBuffer::new(
+        allocator,
+        *vk::BufferCreateInfoBuilder::new()
+            .size(size)
+            .usage(vk::BufferUsageFlags::UNIFORM_BUFFER),
+        vk_mem_erupt::MemoryUsage::CpuToGpu,
+        Default::default(),
+        label!("UniformBuffer"),
     )
 }
 
 pub fn create_descriptor_sets(
     device: Arc<Device>,
     descriptor_set_manager: &mut DescriptorSetManager,
-    global_layout: &DescriptorSetLayout,
-    object_layout: &DescriptorSetLayout,
+    layout: &DescriptorSetLayout,
     uniform_buffer: &AllocatedBuffer,
     object_buffer: &AllocatedBuffer,
     max_objects: usize,
-) -> (DescriptorSet, DescriptorSet) {
-    let global_set = descriptor_set_manager.allocate(global_layout, None);
-    let object_set = descriptor_set_manager.allocate(object_layout, None);
+) -> DescriptorSet {
+    let set = descriptor_set_manager.allocate(layout, None);
 
-    let camera_info = vk::DescriptorBufferInfoBuilder::new()
+    let global_uniform_buffer_info = vk::DescriptorBufferInfoBuilder::new()
         .buffer(**uniform_buffer)
         .range(std::mem::size_of::<GlobalUniform>() as u64);
-    let buffer_info = &[camera_info];
-    let scene_params_info = vk::DescriptorBufferInfoBuilder::new()
-        .buffer(**uniform_buffer)
-        .range(std::mem::size_of::<GpuSceneData>() as u64);
-    let scene_params_info = &[scene_params_info];
+    let global_uniform_buffer_info = &[global_uniform_buffer_info];
 
-    let uniform_set_write_0 = vk::WriteDescriptorSetBuilder::new()
-        .dst_binding(1)
-        .dst_set(*global_set)
-        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC)
-        .buffer_info(scene_params_info);
-    let uniform_set_write_1 = vk::WriteDescriptorSetBuilder::new()
+    let uniform_write = vk::WriteDescriptorSetBuilder::new()
         .dst_binding(0)
-        .dst_set(*global_set)
+        .dst_set(*set)
         .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC)
-        .buffer_info(buffer_info);
+        .buffer_info(global_uniform_buffer_info);
 
-    let object_params_info = vk::DescriptorBufferInfoBuilder::new()
+    let object_buffer_info = vk::DescriptorBufferInfoBuilder::new()
         .buffer(**object_buffer)
         .range((std::mem::size_of::<cgmath::Matrix4<f32>>() * max_objects) as u64);
-    let object_params_info = [object_params_info];
-    let object_set_write = vk::WriteDescriptorSetBuilder::new()
-        .dst_binding(0)
-        .dst_set(*object_set)
+    let object_buffer_info = [object_buffer_info];
+    let object_write = vk::WriteDescriptorSetBuilder::new()
+        .dst_binding(1)
+        .dst_set(*set)
         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-        .buffer_info(&object_params_info);
+        .buffer_info(&object_buffer_info);
 
     unsafe {
-        device.update_descriptor_sets(
-            &[uniform_set_write_0, uniform_set_write_1, object_set_write],
-            &[],
-        );
+        device.update_descriptor_sets(&[uniform_write, object_write], &[]);
     }
-
-    (global_set, object_set)
+    set
 }
 
 pub fn create_depth_images(
@@ -767,96 +742,6 @@ pub fn create_textures_set_layout(
         }],
         Some(&[vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT]),
     )
-}
-
-pub fn create_textures_set<'a>(
-    device: &Arc<Device>,
-    descriptor_set_manager: &mut DescriptorSetManager,
-    views: impl ExactSizeIterator<Item = &'a ImageView>,
-    set_layout: &DescriptorSetLayout,
-) -> DescriptorSet {
-    let view_number = views.len();
-    let descriptor_counts = [view_number as u32];
-    let descriptor_counts = descriptor_counts.as_ptr();
-    let variable_info = vk::DescriptorSetVariableDescriptorCountAllocateInfo {
-        descriptor_set_count: 1,
-        p_descriptor_counts: descriptor_counts,
-        ..Default::default()
-    };
-    let textures_set = descriptor_set_manager.allocate(set_layout, Some(&variable_info));
-    if view_number == 0 {
-        return textures_set;
-    }
-    let image_infos = views
-        .map(|view| {
-            let image_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
-            vk::DescriptorImageInfoBuilder::new()
-                .image_layout(image_layout)
-                .image_view(**view)
-        })
-        .collect::<Vec<_>>();
-    let mut writes = Vec::new();
-    for i in 0..image_infos.len() {
-        writes.push(
-            vk::WriteDescriptorSetBuilder::new()
-                .dst_binding(0)
-                .dst_set(*textures_set)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&image_infos[i..i + 1])
-                .dst_array_element(i as u32),
-        );
-    }
-    let writes = [vk::WriteDescriptorSetBuilder::new()
-        .dst_binding(0)
-        .dst_set(*textures_set)
-        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .image_info(&image_infos)
-        .dst_array_element(0)];
-    unsafe {
-        device.update_descriptor_sets(&writes, &[]);
-    }
-    textures_set
-}
-
-pub fn create_indirect_buffer(allocator: Arc<Allocator>, size: u64) -> AllocatedBuffer {
-    let buffer_info = vk::BufferCreateInfoBuilder::new().size(size).usage(
-        vk::BufferUsageFlags::STORAGE_BUFFER
-            | vk::BufferUsageFlags::INDIRECT_BUFFER
-            | vk::BufferUsageFlags::TRANSFER_DST,
-    );
-    AllocatedBuffer::new(
-        allocator,
-        *buffer_info,
-        vk_mem_erupt::MemoryUsage::GpuOnly,
-        vk::MemoryPropertyFlags::empty(),
-        label!("IndirectBuffer"),
-    )
-}
-
-pub fn create_indirect_buffer_set(
-    device: &Device,
-    descriptor_set_manager: &mut DescriptorSetManager,
-    indirect_buffer: &AllocatedBuffer,
-    set_layout: &DescriptorSetLayout,
-) -> DescriptorSet {
-    let set = descriptor_set_manager.allocate(set_layout, None);
-
-    let write_buffer_info = vk::DescriptorBufferInfoBuilder::new()
-        .buffer(**indirect_buffer)
-        .range(indirect_buffer.size)
-        .offset(0);
-    let buffer_info = &[write_buffer_info];
-    let indirect_buffer_write = vk::WriteDescriptorSetBuilder::new()
-        .buffer_info(buffer_info)
-        .dst_set(*set)
-        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-        .dst_binding(0);
-
-    let writes = [indirect_buffer_write];
-    unsafe {
-        device.update_descriptor_sets(&writes, &[]);
-    }
-    set
 }
 
 pub fn create_mesh_buffer_set(
