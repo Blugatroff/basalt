@@ -1,5 +1,8 @@
 use crate::{
-    buffer::AllocatedBuffer, descriptor_sets::DescriptorSet, handles::*, image::AllocatedImage,
+    buffer,
+    descriptor_sets::DescriptorSet,
+    handles::{Fence, ImageView, Semaphore},
+    image,
 };
 use erupt::vk;
 
@@ -8,27 +11,28 @@ pub struct Frames {
     pub render_fences: Vec<Fence>,
     pub render_semaphores: Vec<Semaphore>,
     pub command_buffers: Vec<vk::CommandBuffer>,
-    pub depth_images: Vec<AllocatedImage>,
+    pub depth_images: Vec<image::Allocated>,
     pub depth_image_views: Vec<ImageView>,
     pub descriptor_sets: Vec<DescriptorSet>,
-    pub renderables_buffers: Vec<AllocatedBuffer>,
+    pub renderables_buffers: Vec<buffer::Allocated>,
     pub max_objects: Vec<usize>,
-    pub mesh_buffers: Vec<AllocatedBuffer>,
+    pub mesh_buffers: Vec<buffer::Allocated>,
     pub mesh_sets: Vec<DescriptorSet>,
     pub cleanup: Vec<Option<Box<dyn FnOnce()>>>,
 }
 
+#[allow(clippy::module_name_repetitions)]
 pub struct FrameData<'a> {
     pub present_semaphore: &'a Semaphore,
     pub render_fence: &'a Fence,
     pub render_semaphore: &'a Semaphore,
     pub command_buffer: &'a vk::CommandBuffer,
-    pub depth_image: &'a AllocatedImage,
+    pub depth_image: &'a image::Allocated,
     pub depth_image_view: &'a ImageView,
     pub descriptor_set: &'a mut DescriptorSet,
-    pub renderables_buffer: &'a mut AllocatedBuffer,
+    pub renderables_buffer: &'a mut buffer::Allocated,
     pub max_objects: &'a mut usize,
-    pub mesh_buffer: &'a mut AllocatedBuffer,
+    pub mesh_buffer: &'a mut buffer::Allocated,
     pub mesh_set: &'a mut DescriptorSet,
     pub cleanup: &'a mut Option<Box<dyn FnOnce()>>,
 }

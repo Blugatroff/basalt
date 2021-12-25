@@ -1,5 +1,5 @@
+use crate::buffer;
 use crate::{
-    buffer::AllocatedBuffer,
     descriptor_sets::{DescriptorSet, DescriptorSetLayout, DescriptorSetManager},
     handles::{Allocator, Device, ImageView, Sampler},
     utils::immediate_submit,
@@ -9,14 +9,14 @@ use erupt::vk;
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub struct AllocatedImage {
+pub struct Allocated {
     image: vk::Image,
     allocation: vk_mem_erupt::Allocation,
     allocator: Arc<Allocator>,
     name: String,
 }
 
-impl std::ops::Deref for AllocatedImage {
+impl std::ops::Deref for Allocated {
     type Target = vk::Image;
     fn deref(&self) -> &Self::Target {
         &self.image
@@ -24,13 +24,13 @@ impl std::ops::Deref for AllocatedImage {
 }
 
 #[derive(Clone)]
-pub struct ImageLoader {
+pub struct Loader {
     pub device: Arc<Device>,
     pub transfer_context: Arc<TransferContext>,
     pub allocator: Arc<Allocator>,
 }
 
-impl AllocatedImage {
+impl Allocated {
     pub fn image_create_info<'a>(
         format: vk::Format,
         usage_flags: vk::ImageUsageFlags,
@@ -77,17 +77,17 @@ impl AllocatedImage {
         let allocation_info = vk_mem_erupt::AllocationCreateInfo {
             usage: vk_mem_erupt::MemoryUsage::GpuOnly,
             required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            ..Default::default()
+            ..vk_mem_erupt::AllocationCreateInfo::default()
         };
         let (image, allocation, _) = allocator.create_image(&info, &allocation_info).unwrap();
         Self {
             image,
-            allocator,
             allocation,
+            allocator,
             name,
         }
     }
-    pub fn open(image_loader: &ImageLoader, path: &std::path::Path) -> Self {
+    pub fn open(image_loader: &Loader, path: &std::path::Path) -> Self {
         let image = image::open(path).unwrap();
         let image = image.into_rgba8();
         let width = image.width();
@@ -96,25 +96,19 @@ impl AllocatedImage {
         let name = format!("{:?}", path);
         Self::load(image_loader, &image, width, height, name)
     }
-    pub fn load(
-        image_loader: &ImageLoader,
-        data: &[u8],
-        width: u32,
-        height: u32,
-        name: String,
-    ) -> Self {
+    pub fn load(image_loader: &Loader, data: &[u8], width: u32, height: u32, name: String) -> Self {
         let image_size = width * height * 4;
         let image_format = vk::Format::R8G8B8A8_SRGB;
-        assert_eq!(data.len() as u32, image_size);
+        assert_eq!(data.len(), image_size as usize);
         let buffer_info = vk::BufferCreateInfoBuilder::new()
-            .size(image_size as u64)
+            .size(u64::from(image_size))
             .usage(vk::BufferUsageFlags::TRANSFER_SRC);
 
-        let staging_buffer = AllocatedBuffer::new(
+        let staging_buffer = buffer::Allocated::new(
             image_loader.allocator.clone(),
             *buffer_info,
             vk_mem_erupt::MemoryUsage::CpuOnly,
-            Default::default(),
+            erupt::vk1_0::MemoryPropertyFlags::default(),
             label!("ImageStagingBuffer"),
         );
         let ptr = staging_buffer.map() as *mut _;
@@ -201,7 +195,7 @@ impl AllocatedImage {
     }
 }
 
-impl Drop for AllocatedImage {
+impl Drop for Allocated {
     fn drop(&mut self) {
         println!("DROPPED AllocatedImage! {}", self.name);
         self.allocator.destroy_image(self.image, &self.allocation);
@@ -209,7 +203,7 @@ impl Drop for AllocatedImage {
 }
 
 pub struct Texture {
-    pub image: Arc<AllocatedImage>,
+    pub image: Arc<Allocated>,
     pub view: Arc<ImageView>,
     pub set: Arc<DescriptorSet>,
     pub sampler: Arc<Sampler>,
@@ -217,14 +211,14 @@ pub struct Texture {
 
 impl Texture {
     pub fn new(
-        device: Arc<Device>,
+        device: &Arc<Device>,
         descriptor_set_manager: &mut DescriptorSetManager,
         texture_set_layout: &DescriptorSetLayout,
-        image: AllocatedImage,
+        image: Allocated,
         sampler: Arc<Sampler>,
     ) -> Self {
         let image = Arc::new(image);
-        let image_view_create_info = AllocatedImage::image_view_create_info(
+        let image_view_create_info = Allocated::image_view_create_info(
             vk::Format::R8G8B8A8_SRGB,
             **image,
             vk::ImageAspectFlags::COLOR,

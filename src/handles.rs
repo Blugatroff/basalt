@@ -10,8 +10,8 @@ impl std::fmt::Debug for Allocator {
 }
 
 impl Allocator {
-    pub fn new(info: vk_mem_erupt::AllocatorCreateInfo) -> Self {
-        Self(vk_mem_erupt::Allocator::new(&info).unwrap())
+    pub fn new(info: &vk_mem_erupt::AllocatorCreateInfo) -> Self {
+        Self(vk_mem_erupt::Allocator::new(info).unwrap())
     }
 }
 
@@ -40,8 +40,7 @@ impl MyInto<vk::DescriptorType> for spirv_reflect::types::ReflectDescriptorType 
             spirv_reflect::types::ReflectDescriptorType::Undefined => todo!(),
             spirv_reflect::types::ReflectDescriptorType::Sampler => vk::DescriptorType::SAMPLER,
             spirv_reflect::types::ReflectDescriptorType::CombinedImageSampler => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            spirv_reflect::types::ReflectDescriptorType::SampledImage => vk::DescriptorType::SAMPLED_IMAGE,
-            spirv_reflect::types::ReflectDescriptorType::StorageImage => vk::DescriptorType::SAMPLED_IMAGE,
+            spirv_reflect::types::ReflectDescriptorType::SampledImage | spirv_reflect::types::ReflectDescriptorType::StorageImage => vk::DescriptorType::SAMPLED_IMAGE,
             spirv_reflect::types::ReflectDescriptorType::UniformTexelBuffer => vk::DescriptorType::UNIFORM_TEXEL_BUFFER,
             spirv_reflect::types::ReflectDescriptorType::StorageTexelBuffer => vk::DescriptorType::STORAGE_TEXEL_BUFFER,
             spirv_reflect::types::ReflectDescriptorType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
@@ -67,7 +66,7 @@ impl ShaderModule {
     }
     pub fn new(device: Arc<Device>, spv: &[u8], name: String) -> Self {
         assert!(spv.len() % 4 == 0);
-        let code = unsafe { std::slice::from_raw_parts(spv.as_ptr() as *const u32, spv.len() / 4) };
+        let code = unsafe { std::slice::from_raw_parts(spv.as_ptr().cast(), spv.len() / 4) };
         let create_info = vk::ShaderModuleCreateInfoBuilder::new().code(code);
         let module = unsafe { device.create_shader_module(&create_info, None) }.unwrap();
         Self {
@@ -151,6 +150,7 @@ impl Drop for Instance {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct PipelineDesc<'a> {
     pub view_port: vk::Viewport,
     pub scissor: vk::Rect2DBuilder<'a>,
@@ -188,7 +188,7 @@ impl ComputePipeline {
         };
         assert_eq!(pipeline.len(), 1);
         let pipeline = pipeline[0];
-        Self { device, pipeline }
+        Self { pipeline, device }
     }
 }
 
@@ -220,7 +220,6 @@ impl Pipeline {
         desc: PipelineDesc,
         name: impl Into<String>,
     ) -> Self {
-        let name = name.into();
         fn new(device: &Device, pass: vk::RenderPass, desc: PipelineDesc) -> vk::Pipeline {
             let viewports = &[desc.view_port.into_builder()];
             let scissors = &[desc.scissor];
@@ -247,6 +246,7 @@ impl Pipeline {
 
             unsafe { device.create_graphics_pipelines(None, &[pipeline_info], None) }.unwrap()[0]
         }
+        let name = name.into();
         Self {
             pipeline: new(&device, pass, desc),
             device,

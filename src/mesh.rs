@@ -1,6 +1,7 @@
+use crate::buffer;
+use crate::handles::Allocator;
 use crate::handles::Device;
 use crate::utils::{immediate_submit, round_to};
-use crate::{handles::Allocator, AllocatedBuffer};
 use crate::{GpuDataRenderable, TransferContext};
 use erupt::vk;
 use std::sync::Arc;
@@ -25,11 +26,11 @@ impl Vertex {
         let bindings = vec![
             vk::VertexInputBindingDescriptionBuilder::new()
                 .binding(0)
-                .stride(std::mem::size_of::<Self>() as u32)
+                .stride(std::mem::size_of::<Self>().try_into().unwrap())
                 .input_rate(vk::VertexInputRate::VERTEX),
             vk::VertexInputBindingDescriptionBuilder::new()
                 .binding(1)
-                .stride(std::mem::size_of::<GpuDataRenderable>() as u32)
+                .stride(std::mem::size_of::<GpuDataRenderable>().try_into().unwrap())
                 .input_rate(vk::VertexInputRate::INSTANCE),
         ];
         let attributes = vec![
@@ -42,12 +43,12 @@ impl Vertex {
                 .binding(0)
                 .location(1)
                 .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(std::mem::size_of::<[f32; 3]>() as u32),
+                .offset(std::mem::size_of::<[f32; 3]>().try_into().unwrap()),
             vk::VertexInputAttributeDescriptionBuilder::new()
                 .binding(0)
                 .location(2)
                 .format(vk::Format::R32G32_SFLOAT)
-                .offset(std::mem::size_of::<[f32; 6]>() as u32),
+                .offset(std::mem::size_of::<[f32; 6]>().try_into().unwrap()),
         ];
         let flags = vk::PipelineVertexInputStateCreateFlags::default();
         VertexInfoDescription {
@@ -59,19 +60,19 @@ impl Vertex {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct MeshBounds {
+pub struct Bounds {
     pub max: cgmath::Vector3<f32>,
     pub min: cgmath::Vector3<f32>,
 }
 
 #[derive(Debug)]
 pub struct Mesh {
-    pub bounds: MeshBounds,
+    pub bounds: Bounds,
     pub vertex_start: u32,
     pub index_start: u32,
     pub vertex_count: u32,
     pub index_count: u32,
-    pub buffer: Arc<AllocatedBuffer>,
+    pub buffer: Arc<buffer::Allocated>,
     vertex_type_size: usize,
 }
 
@@ -81,7 +82,7 @@ impl Mesh {
         indices: &[u32],
         allocator: Arc<Allocator>,
         transfer_context: &TransferContext,
-        device: Arc<Device>,
+        device: &Arc<Device>,
         host_visible: bool,
     ) -> Self {
         let bounds = Self::calculate_bounds(vertices);
@@ -96,8 +97,8 @@ impl Mesh {
         )
     }
     #[rustfmt::skip]
-    fn calculate_bounds(vertices: &[Vertex]) -> MeshBounds {
-        let mut bounds = MeshBounds {
+    fn calculate_bounds(vertices: &[Vertex]) -> Bounds {
+        let mut bounds = Bounds {
             max: cgmath::Vector3::new(0.0, 0.0, 0.0),
             min: cgmath::Vector3::new(0.0, 0.0, 0.0),
         };
@@ -115,15 +116,15 @@ impl Mesh {
     pub fn new_into_buffer<V>(
         vertices: &[V],
         indices: &[u32],
-        bounds: MeshBounds,
-        buffer: Arc<AllocatedBuffer>,
+        bounds: Bounds,
+        buffer: Arc<buffer::Allocated>,
         offset: usize,
     ) -> Option<(Self, usize)> {
         assert_eq!(offset % std::mem::size_of::<V>(), 0);
-        if (buffer.size as usize)
-            < offset
+        if (buffer.size as u64)
+            < (offset
                 + vertices.len() * std::mem::size_of::<V>()
-                + indices.len() * std::mem::size_of::<u32>()
+                + indices.len() * std::mem::size_of::<u32>()) as u64
         {
             return None;
         }
@@ -140,27 +141,29 @@ impl Mesh {
         Some((
             Self {
                 bounds,
-                vertex_start: (offset / std::mem::size_of::<V>()) as u32,
+                vertex_start: (offset / std::mem::size_of::<V>()).try_into().unwrap(),
                 index_start: ((offset + std::mem::size_of::<V>() * vertices.len())
-                    / std::mem::size_of::<u32>()) as u32,
-                vertex_count: vertices.len() as u32,
-                index_count: indices.len() as u32,
+                    / std::mem::size_of::<u32>())
+                .try_into()
+                .unwrap(),
+                vertex_count: vertices.len().try_into().unwrap(),
+                index_count: indices.len().try_into().unwrap(),
                 buffer,
                 vertex_type_size: std::mem::size_of::<V>(),
             },
             vertices.len() * std::mem::size_of::<V>() + indices.len() * std::mem::size_of::<u32>(),
         ))
     }
-    pub fn override_buffer(&mut self, buffer: Arc<AllocatedBuffer>) {
+    pub fn override_buffer(&mut self, buffer: Arc<buffer::Allocated>) {
         self.buffer = buffer;
     }
     pub fn new_with_bounds<V>(
         vertices: &[V],
         indices: &[u32],
-        bounds: MeshBounds,
+        bounds: Bounds,
         allocator: Arc<Allocator>,
         transfer_context: &TransferContext,
-        device: Arc<Device>,
+        device: &Arc<Device>,
         host_visible: bool,
     ) -> Self {
         let size =
@@ -172,11 +175,11 @@ impl Mesh {
                     | vk::BufferUsageFlags::TRANSFER_SRC,
             )
             .size(size as u64);
-        let buffer = Arc::new(AllocatedBuffer::new(
+        let buffer = Arc::new(buffer::Allocated::new(
             allocator,
             *buffer_info,
             vk_mem_erupt::MemoryUsage::CpuToGpu,
-            Default::default(),
+            erupt::vk1_0::MemoryPropertyFlags::default(),
             label!("MeshStagingBuffer"),
         ));
         let (mut mesh, _) = Self::new_into_buffer(vertices, indices, bounds, buffer, 0).unwrap();
@@ -194,7 +197,7 @@ impl Mesh {
         meshes: impl IntoIterator<Item = &'a mut Self>,
         allocator: Arc<Allocator>,
         transfer_context: &TransferContext,
-        device: Arc<Device>,
+        device: &Arc<Device>,
     ) {
         let mut meshes = meshes.into_iter().collect::<Vec<&mut Self>>();
         if meshes.is_empty() {
@@ -217,16 +220,16 @@ impl Mesh {
         let buffer_info = vk::BufferCreateInfoBuilder::new()
             .size(staging_buffer_size)
             .usage(vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST);
-        let staging_buffer = Arc::new(AllocatedBuffer::new(
+        let staging_buffer = Arc::new(buffer::Allocated::new(
             allocator,
             *buffer_info,
             vk_mem_erupt::MemoryUsage::CpuToGpu,
-            Default::default(),
+            erupt::vk1_0::MemoryPropertyFlags::default(),
             label!("CombineMeshesStagingBuffer"),
         ));
         let mut offset = 0;
-        immediate_submit(&device, transfer_context, |cmd| unsafe {
-            for mesh in meshes.iter_mut() {
+        immediate_submit(device, transfer_context, |cmd| unsafe {
+            for mesh in &mut meshes {
                 offset = round_to(offset, mesh.vertex_type_size as u64);
                 let region = vk::BufferCopyBuilder::new()
                     .src_offset(0)
@@ -235,8 +238,12 @@ impl Mesh {
 
                 let regions = &[region];
                 device.cmd_copy_buffer(cmd, **mesh.buffer, **staging_buffer, regions);
-                mesh.index_start += offset as u32 / std::mem::size_of::<u32>() as u32;
-                mesh.vertex_start += offset as u32 / (mesh.vertex_type_size as u32);
+                mesh.index_start +=
+                    TryInto::<u32>::try_into(offset as u64 / std::mem::size_of::<u32>() as u64)
+                        .unwrap();
+                mesh.vertex_start +=
+                    TryInto::<u32>::try_into(offset as u64 / (mesh.vertex_type_size as u64))
+                        .unwrap();
                 offset += mesh.buffer.size;
             }
         });
@@ -255,7 +262,7 @@ impl Mesh {
         allocator: Arc<Allocator>,
         path: P,
         transfer_context: &TransferContext,
-        device: Arc<Device>,
+        device: &Arc<Device>,
     ) -> Result<Vec<Self>, tobj::LoadError> {
         let (models, _) = tobj::load_obj(
             &path,
@@ -302,7 +309,7 @@ impl Mesh {
                     &indices,
                     allocator.clone(),
                     transfer_context,
-                    device.clone(),
+                    device,
                     true,
                 )
             })

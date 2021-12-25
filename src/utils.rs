@@ -1,17 +1,19 @@
 use crate::handles::Device;
+use crate::image;
+use crate::{buffer, GpuDataRenderable};
 use crate::{
-    buffer::AllocatedBuffer,
     debug_callback,
     descriptor_sets::{
         DescriptorSet, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetManager,
     },
-    handles::*,
-    image::AllocatedImage,
+    handles::{
+        Allocator, CommandPool, Framebuffer, ImageView, RenderPass, ShaderModule, Swapchain,
+    },
     GlobalUniform, TransferContext, LAYER_KHRONOS_VALIDATION,
 };
 use erupt::{cstr, vk, DeviceLoader, InstanceLoader};
 use std::{
-    ffi::{c_void, CStr, CString},
+    ffi::{CStr, CString},
     sync::Arc,
 };
 
@@ -141,7 +143,7 @@ pub fn create_instance(
             println!();
             break;
         }
-        print!("{}", c as u8 as char);
+        print!("{}", TryInto::<u8>::try_into(c).unwrap() as char);
         v = unsafe { (v).add(1) };
     });
 
@@ -176,8 +178,8 @@ pub fn create_instance(
         .enabled_layer_names(&instance_layers);
 
     if validation_layers {
-        instance_info.p_next =
-            messenger_info as *const vk::DebugUtilsMessengerCreateInfoEXT as *const c_void;
+        instance_info.p_next = (messenger_info as *const vk::DebugUtilsMessengerCreateInfoEXT)
+            .cast::<std::ffi::c_void>();
     }
 
     let instance = unsafe { InstanceLoader::new(&entry, &instance_info, None) }.unwrap();
@@ -188,27 +190,27 @@ pub fn create_uniform_buffer(
     allocator: Arc<Allocator>,
     frames_in_flight: u64,
     limits: &vk::PhysicalDeviceLimits,
-) -> AllocatedBuffer {
+) -> buffer::Allocated {
     let size = pad_uniform_buffer_size(limits, std::mem::size_of::<GlobalUniform>() as u64)
         * frames_in_flight;
 
-    AllocatedBuffer::new(
+    buffer::Allocated::new(
         allocator,
         *vk::BufferCreateInfoBuilder::new()
             .size(size)
             .usage(vk::BufferUsageFlags::UNIFORM_BUFFER),
         vk_mem_erupt::MemoryUsage::CpuToGpu,
-        Default::default(),
+        erupt::vk1_0::MemoryPropertyFlags::default(),
         label!("UniformBuffer"),
     )
 }
 
 pub fn create_descriptor_sets(
-    device: Arc<Device>,
+    device: &Device,
     descriptor_set_manager: &mut DescriptorSetManager,
     layout: &DescriptorSetLayout,
-    uniform_buffer: &AllocatedBuffer,
-    object_buffer: &AllocatedBuffer,
+    uniform_buffer: &buffer::Allocated,
+    object_buffer: &buffer::Allocated,
     max_objects: usize,
 ) -> DescriptorSet {
     let set = descriptor_set_manager.allocate(layout, None);
@@ -241,11 +243,11 @@ pub fn create_descriptor_sets(
 }
 
 pub fn create_depth_images(
-    allocator: Arc<Allocator>,
+    allocator: &Arc<Allocator>,
     width: u32,
     height: u32,
     frames_in_flight: usize,
-) -> Vec<AllocatedImage> {
+) -> Vec<image::Allocated> {
     let format = vk::Format::D32_SFLOAT;
     let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
     let extent = vk::Extent3D {
@@ -255,7 +257,7 @@ pub fn create_depth_images(
     };
     (0..frames_in_flight)
         .map(|_| {
-            AllocatedImage::new(
+            image::Allocated::new(
                 allocator.clone(),
                 format,
                 usage,
@@ -266,11 +268,14 @@ pub fn create_depth_images(
         })
         .collect()
 }
-pub fn create_depth_image_views(device: Arc<Device>, images: &[AllocatedImage]) -> Vec<ImageView> {
+pub fn create_depth_image_views(
+    device: &Arc<Device>,
+    images: &[image::Allocated],
+) -> Vec<ImageView> {
     images
         .iter()
         .map(|image| {
-            let info = AllocatedImage::image_view_create_info(
+            let info = image::Allocated::image_view_create_info(
                 vk::Format::D32_SFLOAT,
                 **image,
                 vk::ImageAspectFlags::DEPTH,
@@ -306,17 +311,16 @@ pub fn create_device_and_queue(
         .enabled_layer_names(device_layers)
         .build();
 
-    /* let synchronization_2_feature =
-    vk::PhysicalDeviceSynchronization2FeaturesKHRBuilder::new().synchronization2(true); */
     let indexing_features = vk::PhysicalDeviceDescriptorIndexingFeaturesEXT {
-        //p_next: &synchronization_2_feature as *const _ as *mut std::ffi::c_void,
         shader_sampled_image_array_non_uniform_indexing: vk::TRUE,
         descriptor_binding_partially_bound: vk::TRUE,
         descriptor_binding_variable_descriptor_count: vk::TRUE,
         runtime_descriptor_array: vk::TRUE,
-        ..Default::default()
+        ..vk::PhysicalDeviceDescriptorIndexingFeatures::default()
     };
-    device_info.p_next = &indexing_features as *const _ as *const c_void;
+    device_info.p_next = (&indexing_features
+        as *const vk::PhysicalDeviceDescriptorIndexingFeatures)
+        .cast::<std::ffi::c_void>();
 
     let device =
         unsafe { DeviceLoader::new(instance, physical_device, &device_info, None) }.unwrap();
@@ -399,7 +403,7 @@ pub fn create_swapchain(
     physical_device: vk::PhysicalDevice,
     surface: vk::SurfaceKHR,
     format: vk::SurfaceFormatKHR,
-    device: Arc<Device>,
+    device: &Arc<Device>,
     present_mode: vk::PresentModeKHR,
     old_swapchain: Option<vk::SwapchainKHR>,
 ) -> (Swapchain, Vec<vk::Image>, Vec<ImageView>) {
@@ -498,6 +502,7 @@ pub fn create_framebuffers(
         .collect::<Vec<_>>()
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn create_physical_device(
     instance: &InstanceLoader,
     surface: vk::SurfaceKHR,
@@ -538,12 +543,12 @@ pub fn create_physical_device(
                         && instance
                             .get_physical_device_surface_support_khr(
                                 physical_device,
-                                i as u32,
+                                i.try_into().unwrap(),
                                 surface,
                             )
                             .unwrap()
                 }) {
-                Some(queue_family) => queue_family as u32,
+                Some(queue_family) => queue_family.try_into().unwrap(),
                 None => return None,
             };
             dbg!("GOT HERE");
@@ -560,7 +565,7 @@ pub fn create_physical_device(
                         .queue_flags
                         .contains(vk::QueueFlags::TRANSFER) && queue_family_properties
                         .queue_flags.contains(vk::QueueFlags::COMPUTE) && i != graphics_queue_family as usize
-                }).map(|i| i as u32);
+                }).map(|i| i.try_into().unwrap());
             dbg!((graphics_queue_family, transfer_queue));
             let formats = instance
                 .get_physical_device_surface_formats_khr(physical_device, surface, None)
@@ -655,7 +660,7 @@ pub fn create_debug_messenger(
     if validation_layers {
         unsafe { instance.create_debug_utils_messenger_ext(messenger_info, None) }.unwrap()
     } else {
-        Default::default()
+        erupt::vk::DebugUtilsMessengerEXT::default()
     }
 }
 pub fn create_debug_messenger_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
@@ -674,15 +679,15 @@ pub fn create_debug_messenger_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
         .build()
 }
 
-pub fn create_renderables_buffer(allocator: Arc<Allocator>, max_objects: u64) -> AllocatedBuffer {
-    let size = std::mem::size_of::<crate::GpuDataRenderable>() as u64 * max_objects;
-    AllocatedBuffer::new(
+pub fn create_renderables_buffer(allocator: Arc<Allocator>, max_objects: u64) -> buffer::Allocated {
+    let size = std::mem::size_of::<GpuDataRenderable>() as u64 * max_objects;
+    buffer::Allocated::new(
         allocator,
         *vk::BufferCreateInfoBuilder::new()
             .size(size)
             .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER),
         vk_mem_erupt::MemoryUsage::CpuToGpu,
-        Default::default(),
+        erupt::vk1_0::MemoryPropertyFlags::default(),
         label!("RenderablesBuffer"),
     )
 }
@@ -724,7 +729,7 @@ where
 pub fn create_mesh_buffer_set(
     device: &Device,
     descriptor_set_manager: &mut DescriptorSetManager,
-    buffer: &AllocatedBuffer,
+    buffer: &buffer::Allocated,
     set_layout: &DescriptorSetLayout,
 ) -> DescriptorSet {
     let set = descriptor_set_manager.allocate(set_layout, None);
@@ -745,15 +750,15 @@ pub fn create_mesh_buffer_set(
     set
 }
 
-pub fn create_mesh_buffer(allocator: Arc<Allocator>, size: u64) -> AllocatedBuffer {
+pub fn create_mesh_buffer(allocator: Arc<Allocator>, size: u64) -> buffer::Allocated {
     let buffer_info = vk::BufferCreateInfoBuilder::new()
         .size(size)
         .usage(vk::BufferUsageFlags::STORAGE_BUFFER);
-    AllocatedBuffer::new(
+    buffer::Allocated::new(
         allocator,
         *buffer_info,
         vk_mem_erupt::MemoryUsage::CpuToGpu,
-        Default::default(),
+        erupt::vk1_0::MemoryPropertyFlags::default(),
         label!("MeshBuffer"),
     )
 }

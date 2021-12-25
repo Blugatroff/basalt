@@ -6,11 +6,11 @@ use sdl2::event::Event;
 use std::sync::Arc;
 
 use crate::{
-    buffer::AllocatedBuffer,
+    buffer,
     descriptor_sets::{DescriptorSetLayout, DescriptorSetManager},
     handles::{Allocator, Pipeline, PipelineDesc, Sampler, ShaderModule},
-    image::{AllocatedImage, ImageLoader, Texture},
-    mesh::{Mesh, MeshBounds, VertexInfoDescription},
+    image::{Allocated, Loader, Texture},
+    mesh::{Bounds, Mesh, VertexInfoDescription},
     utils::{
         create_full_view_port, depth_stencil_create_info, input_assembly_create_info,
         multisampling_state_create_info, pipeline_shader_stage_create_info,
@@ -24,23 +24,23 @@ enum KeyOrEvent {
     Event(egui::Event),
 }
 
-fn sdl2_key_to_egui_key(key: &sdl2::keyboard::Keycode) -> Option<KeyOrEvent> {
+fn sdl2_key_to_egui_key(key: sdl2::keyboard::Keycode) -> Option<KeyOrEvent> {
     Some(KeyOrEvent::Key(match key {
         sdl2::keyboard::Keycode::Backspace => egui::Key::Backspace,
         sdl2::keyboard::Keycode::Tab => egui::Key::Tab,
         sdl2::keyboard::Keycode::Return => egui::Key::Enter,
         sdl2::keyboard::Keycode::Escape => egui::Key::Escape,
         sdl2::keyboard::Keycode::Space => egui::Key::Space,
-        sdl2::keyboard::Keycode::Num0 => egui::Key::Num0,
-        sdl2::keyboard::Keycode::Num1 => egui::Key::Num1,
-        sdl2::keyboard::Keycode::Num2 => egui::Key::Num2,
-        sdl2::keyboard::Keycode::Num3 => egui::Key::Num3,
-        sdl2::keyboard::Keycode::Num4 => egui::Key::Num4,
-        sdl2::keyboard::Keycode::Num5 => egui::Key::Num5,
-        sdl2::keyboard::Keycode::Num6 => egui::Key::Num6,
-        sdl2::keyboard::Keycode::Num7 => egui::Key::Num7,
-        sdl2::keyboard::Keycode::Num8 => egui::Key::Num8,
-        sdl2::keyboard::Keycode::Num9 => egui::Key::Num9,
+        sdl2::keyboard::Keycode::Num0 | sdl2::keyboard::Keycode::Kp0 => egui::Key::Num0,
+        sdl2::keyboard::Keycode::Num1 | sdl2::keyboard::Keycode::Kp1 => egui::Key::Num1,
+        sdl2::keyboard::Keycode::Num2 | sdl2::keyboard::Keycode::Kp2 => egui::Key::Num2,
+        sdl2::keyboard::Keycode::Num3 | sdl2::keyboard::Keycode::Kp3 => egui::Key::Num3,
+        sdl2::keyboard::Keycode::Num4 | sdl2::keyboard::Keycode::Kp4 => egui::Key::Num4,
+        sdl2::keyboard::Keycode::Num5 | sdl2::keyboard::Keycode::Kp5 => egui::Key::Num5,
+        sdl2::keyboard::Keycode::Num6 | sdl2::keyboard::Keycode::Kp6 => egui::Key::Num6,
+        sdl2::keyboard::Keycode::Num7 | sdl2::keyboard::Keycode::Kp7 => egui::Key::Num7,
+        sdl2::keyboard::Keycode::Num8 | sdl2::keyboard::Keycode::Kp8 => egui::Key::Num8,
+        sdl2::keyboard::Keycode::Num9 | sdl2::keyboard::Keycode::Kp9 => egui::Key::Num9,
         sdl2::keyboard::Keycode::A => egui::Key::A,
         sdl2::keyboard::Keycode::B => egui::Key::B,
         sdl2::keyboard::Keycode::C => egui::Key::C,
@@ -77,16 +77,6 @@ fn sdl2_key_to_egui_key(key: &sdl2::keyboard::Keycode) -> Option<KeyOrEvent> {
         sdl2::keyboard::Keycode::Left => egui::Key::ArrowLeft,
         sdl2::keyboard::Keycode::Down => egui::Key::ArrowDown,
         sdl2::keyboard::Keycode::Up => egui::Key::ArrowUp,
-        sdl2::keyboard::Keycode::Kp1 => egui::Key::Num1,
-        sdl2::keyboard::Keycode::Kp2 => egui::Key::Num2,
-        sdl2::keyboard::Keycode::Kp3 => egui::Key::Num3,
-        sdl2::keyboard::Keycode::Kp4 => egui::Key::Num4,
-        sdl2::keyboard::Keycode::Kp5 => egui::Key::Num5,
-        sdl2::keyboard::Keycode::Kp6 => egui::Key::Num6,
-        sdl2::keyboard::Keycode::Kp7 => egui::Key::Num7,
-        sdl2::keyboard::Keycode::Kp8 => egui::Key::Num8,
-        sdl2::keyboard::Keycode::Kp9 => egui::Key::Num9,
-        sdl2::keyboard::Keycode::Kp0 => egui::Key::Num0,
         sdl2::keyboard::Keycode::Copy => return Some(KeyOrEvent::Event(egui::Event::Copy)),
         sdl2::keyboard::Keycode::Cut => return Some(KeyOrEvent::Event(egui::Event::Cut)),
         _ => return None,
@@ -104,11 +94,11 @@ impl EguiVertex {
         let bindings = vec![
             vk::VertexInputBindingDescriptionBuilder::new()
                 .binding(0)
-                .stride(std::mem::size_of::<Self>() as u32)
+                .stride(std::mem::size_of::<Self>().try_into().unwrap())
                 .input_rate(vk::VertexInputRate::VERTEX),
             vk::VertexInputBindingDescriptionBuilder::new()
                 .binding(1)
-                .stride(std::mem::size_of::<GpuDataRenderable>() as u32)
+                .stride(std::mem::size_of::<GpuDataRenderable>().try_into().unwrap())
                 .input_rate(vk::VertexInputRate::INSTANCE),
         ];
         let attributes = vec![
@@ -121,12 +111,12 @@ impl EguiVertex {
                 .binding(0)
                 .location(1)
                 .format(vk::Format::R32G32_SFLOAT)
-                .offset(std::mem::size_of::<[f32; 2]>() as u32),
+                .offset(std::mem::size_of::<[f32; 2]>().try_into().unwrap()),
             vk::VertexInputAttributeDescriptionBuilder::new()
                 .binding(0)
                 .location(2)
                 .format(vk::Format::R8G8B8A8_UNORM)
-                .offset(std::mem::size_of::<[f32; 4]>() as u32),
+                .offset(std::mem::size_of::<[f32; 4]>().try_into().unwrap()),
         ];
         let flags = vk::PipelineVertexInputStateCreateFlags::default();
         VertexInfoDescription {
@@ -143,7 +133,7 @@ pub struct EruptEgui {
     pipeline: usize,
     last_mesh: Vec<Renderable>,
     font_texture_version: u64,
-    buffers: Vec<Arc<AllocatedBuffer>>,
+    buffers: Vec<Arc<buffer::Allocated>>,
     frame: usize,
     texture: Option<Arc<Texture>>,
     sampler: Arc<Sampler>,
@@ -240,22 +230,22 @@ impl EruptEgui {
             allocator: app.allocator.clone(),
         }
     }
-    fn create_buffer(allocator: Arc<Allocator>) -> AllocatedBuffer {
+    fn create_buffer(allocator: Arc<Allocator>) -> buffer::Allocated {
         let buffer_info = vk::BufferCreateInfoBuilder::new()
-            .size(2u64.pow(12))
+            .size(2_u64.pow(12))
             .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER);
-        AllocatedBuffer::new(
+        buffer::Allocated::new(
             allocator,
             *buffer_info,
             vk_mem_erupt::MemoryUsage::CpuToGpu,
-            Default::default(),
+            erupt::vk1_0::MemoryPropertyFlags::default(),
             label!("EguiVertexIndexBuffer"),
         )
     }
     pub fn adjust_frames_in_flight(&mut self, frames_in_flight: usize) {
         self.buffers.resize_with(frames_in_flight, || {
             Arc::new(Self::create_buffer(self.allocator.clone()))
-        })
+        });
     }
     fn default_input() -> egui::RawInput {
         egui::RawInput {
@@ -276,19 +266,19 @@ impl EruptEgui {
     }
     fn upload_font_texture(
         &mut self,
-        image_loader: &ImageLoader,
+        image_loader: &Loader,
         descriptor_set_manager: &mut DescriptorSetManager,
         texture_set_layout: &DescriptorSetLayout,
-        texture: Arc<egui::Texture>,
+        texture: &egui::Texture,
     ) {
         let data = texture
             .pixels
             .iter()
             .flat_map(|r| [*r; 4])
             .collect::<Vec<_>>();
-        let width = texture.width as u32;
-        let height = texture.height as u32;
-        let image = AllocatedImage::load(
+        let width = texture.width.try_into().unwrap();
+        let height = texture.height.try_into().unwrap();
+        let image = Allocated::load(
             image_loader,
             &data,
             width,
@@ -296,7 +286,7 @@ impl EruptEgui {
             label!("EguiTexture").into(),
         );
         let texture = Texture::new(
-            image_loader.device.clone(),
+            &image_loader.device,
             descriptor_set_manager,
             texture_set_layout,
             image,
@@ -306,8 +296,8 @@ impl EruptEgui {
     }
     pub fn run(
         &mut self,
-        allocator: Arc<Allocator>,
-        image_loader: &ImageLoader,
+        allocator: &Arc<Allocator>,
+        image_loader: &Loader,
         descriptor_set_manager: &mut DescriptorSetManager,
         texture_set_layout: &DescriptorSetLayout,
         window_size: (f32, f32),
@@ -329,7 +319,7 @@ impl EruptEgui {
                 image_loader,
                 descriptor_set_manager,
                 texture_set_layout,
-                texture,
+                &texture,
             );
         }
         f(&self.ctx);
@@ -338,15 +328,15 @@ impl EruptEgui {
             return;
         }
         let clipped_meshes = self.ctx.tessellate(shapes);
-        self.last_mesh = self.draw(clipped_meshes, allocator);
+        self.last_mesh = self.draw(&clipped_meshes, allocator);
     }
     pub fn renderables(&self) -> &[Renderable] {
         &self.last_mesh
     }
     fn draw(
         &mut self,
-        clipped_meshes: Vec<egui::ClippedMesh>,
-        allocator: Arc<Allocator>,
+        clipped_meshes: &[egui::ClippedMesh],
+        allocator: &Arc<Allocator>,
     ) -> Vec<Renderable> {
         let font_texture = if let Some(font_texture) = self.texture.as_ref().map(|t| t.set.clone())
         {
@@ -371,7 +361,7 @@ impl EruptEgui {
                 let (mesh, size) = if let Some((mesh, size)) = Mesh::new_into_buffer(
                     &mesh.vertices,
                     &mesh.indices,
-                    MeshBounds { max, min },
+                    Bounds { max, min },
                     buffer.clone(),
                     offset,
                 ) {
@@ -389,11 +379,11 @@ impl EruptEgui {
                             vk::BufferUsageFlags::VERTEX_BUFFER
                                 | vk::BufferUsageFlags::INDEX_BUFFER,
                         );
-                    *buffer = Arc::new(AllocatedBuffer::new(
+                    *buffer = Arc::new(buffer::Allocated::new(
                         allocator.clone(),
                         *buffer_info,
                         vk_mem_erupt::MemoryUsage::CpuToGpu,
-                        Default::default(),
+                        vk::MemoryPropertyFlags::default(),
                         label!("EguiVertexIndexBuffer"),
                     ));
                     continue 'outer;
@@ -432,16 +422,16 @@ impl EruptEgui {
     pub fn process_event(&mut self, event: &sdl2::event::Event) {
         let mut event = || match event {
             Event::Window { win_event, .. } => match win_event {
-                sdl2::event::WindowEvent::Minimized => Some(egui::Event::PointerGone),
-                sdl2::event::WindowEvent::Leave => Some(egui::Event::PointerGone),
-                sdl2::event::WindowEvent::FocusLost => Some(egui::Event::PointerGone),
+                sdl2::event::WindowEvent::Minimized
+                | sdl2::event::WindowEvent::Leave
+                | sdl2::event::WindowEvent::FocusLost => Some(egui::Event::PointerGone),
                 _ => None,
             },
             Event::KeyDown {
                 keymod, keycode, ..
             } => Some(egui::Event::Key {
                 key: match keycode {
-                    Some(key) => match sdl2_key_to_egui_key(key) {
+                    Some(key) => match sdl2_key_to_egui_key(*key) {
                         Some(KeyOrEvent::Key(k)) => k,
                         Some(KeyOrEvent::Event(e)) => return Some(e),
                         None => return None,
@@ -455,7 +445,7 @@ impl EruptEgui {
                 keycode, keymod, ..
             } => Some(egui::Event::Key {
                 key: match keycode {
-                    Some(key) => match sdl2_key_to_egui_key(key) {
+                    Some(key) => match sdl2_key_to_egui_key(*key) {
                         Some(KeyOrEvent::Key(k)) => k,
                         Some(KeyOrEvent::Event(e)) => return Some(e),
                         None => return None,

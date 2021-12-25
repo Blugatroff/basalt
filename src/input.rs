@@ -1,5 +1,6 @@
 use sdl2::event::Event;
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Copy, Clone, Debug)]
 pub struct Input {
     forward: bool,
@@ -19,7 +20,7 @@ pub struct Input {
 }
 
 impl Input {
-    fn set_keycode(&mut self, keycode: &sdl2::keyboard::Keycode, v: bool) {
+    fn set_keycode(&mut self, keycode: sdl2::keyboard::Keycode, v: bool) {
         match keycode {
             sdl2::keyboard::Keycode::W => self.forward = v,
             sdl2::keyboard::Keycode::S => self.backward = v,
@@ -41,8 +42,12 @@ impl Input {
             forwards_backwards: self.forward as i32 as f32 - self.backward as i32 as f32,
             right_left: self.right as i32 as f32 - self.left as i32 as f32,
             up_down: self.up as i32 as f32 - self.down as i32 as f32,
-            look_up_down: -self.look_up_down * 0.005 + (self.look_up as i32 as f32 * self.look_speed * dt) - (self.look_down as i32 as f32 * self.look_speed * dt),
-            look_right_left: -self.look_left_right * 0.005 + (self.look_left as i32 as f32 * self.look_speed * dt) - (self.look_right as i32 as f32 * self.look_speed * dt),
+            look_up_down: -self.look_up_down * 0.005
+                + (self.look_up as i32 as f32 * self.look_speed * dt)
+                - (self.look_down as i32 as f32 * self.look_speed * dt),
+            look_right_left: -self.look_left_right * 0.005
+                + (self.look_left as i32 as f32 * self.look_speed * dt)
+                - (self.look_right as i32 as f32 * self.look_speed * dt),
             speed: self.speed * dt,
         };
         self.look_up_down = 0.0;
@@ -61,11 +66,11 @@ impl Input {
             Event::KeyUp {
                 keycode: Some(keycode),
                 ..
-            } => self.set_keycode(keycode, false),
+            } => self.set_keycode(*keycode, false),
             Event::KeyDown {
                 keycode: Some(keycode),
                 ..
-            } => self.set_keycode(keycode, true),
+            } => self.set_keycode(*keycode, true),
             _ => {}
         }
     }
@@ -87,7 +92,7 @@ impl Default for Input {
             look_down: false,
             look_right: false,
             look_left: false,
-            look_speed: 2.0
+            look_speed: 2.0,
         }
     }
 }

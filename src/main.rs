@@ -1,20 +1,10 @@
-//#![feature(stmt_expr_attributes)]
-use crate::{descriptor_sets::DescriptorSet, image::ImageLoader};
-use buffer::AllocatedBuffer;
-use cgmath::SquareMatrix;
-use descriptor_sets::{DescriptorSetLayout, DescriptorSetManager};
-use erupt::{cstr, vk};
-use gui::EruptEgui;
-use sdl2::{event::Event, EventPump};
-use std::{
-    collections::VecDeque,
-    ffi::{c_void, CStr},
-    os::raw::c_char,
-    path::PathBuf,
-    sync::Arc,
-};
-const LAYER_KHRONOS_VALIDATION: *const c_char = cstr!("VK_LAYER_KHRONOS_validation");
-
+#![deny(clippy::all, clippy::pedantic)]
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::struct_excessive_bools,
+    clippy::cast_ptr_alignment,
+    clippy::ptr_as_ptr
+)]
 macro_rules! label {
     ( $name:expr ) => {
         concat!(label!(), " -> ", $name)
@@ -23,21 +13,49 @@ macro_rules! label {
         concat!(file!(), ":", line!())
     };
 }
-
-mod handles;
-use handles::*;
-mod mesh;
-use mesh::*;
-mod utils;
-use utils::*;
-mod input;
-use input::*;
-mod frame;
-use frame::*;
 mod buffer;
 mod descriptor_sets;
+mod frame;
 mod gui;
+mod handles;
 mod image;
+mod input;
+mod mesh;
+mod utils;
+use crate::descriptor_sets::DescriptorSet;
+use crate::descriptor_sets::DescriptorSetLayoutBinding;
+use cgmath::SquareMatrix;
+use descriptor_sets::{DescriptorSetLayout, DescriptorSetManager};
+use erupt::{cstr, vk};
+use frame::Frames;
+use gui::EruptEgui;
+use handles::{
+    Allocator, CommandPool, Device, Fence, Framebuffer, ImageView, Instance, Pipeline,
+    PipelineDesc, PipelineLayout, RenderPass, Sampler, Semaphore, ShaderModule, Surface, Swapchain,
+};
+use input::Input;
+use mesh::{Mesh, Vertex};
+use sdl2::{event::Event, EventPump};
+use std::{
+    collections::VecDeque,
+    ffi::{c_void, CStr},
+    os::raw::c_char,
+    path::PathBuf,
+    sync::Arc,
+};
+use structopt::StructOpt;
+use utils::{
+    create_command_buffers, create_debug_messenger, create_debug_messenger_info,
+    create_depth_image_views, create_depth_images, create_descriptor_sets, create_device_and_queue,
+    create_framebuffers, create_full_view_port, create_global_descriptor_set_layout,
+    create_instance, create_mesh_buffer, create_mesh_buffer_set, create_physical_device,
+    create_pipeline_color_blend_attachment_state, create_render_pass, create_renderables_buffer,
+    create_swapchain, create_uniform_buffer, create_window, depth_stencil_create_info,
+    input_assembly_create_info, multisampling_state_create_info, pad_uniform_buffer_size,
+    pipeline_shader_stage_create_info, rasterization_state_create_info,
+};
+
+const LAYER_KHRONOS_VALIDATION: *const c_char = cstr!("VK_LAYER_KHRONOS_validation");
 
 unsafe extern "system" fn debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagBitsEXT,
@@ -58,13 +76,6 @@ unsafe extern "system" fn debug_callback(
     }
     vk::FALSE
 }
-
-use structopt::StructOpt;
-
-use crate::{
-    descriptor_sets::DescriptorSetLayoutBinding,
-    image::{AllocatedImage, Texture},
-};
 #[derive(Copy, Clone, Debug, StructOpt)]
 struct Opt {
     /// attempt to enable validation layers
@@ -165,6 +176,7 @@ pub struct TransferContext {
     pub fence: Fence,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     #[allow(dead_code)]
     graphics_queue_family: u32,
@@ -197,12 +209,12 @@ pub struct App {
     render_pass: RenderPass,
     egui: Option<EruptEgui>,
     frames: Frames,
-    uniform_buffer: AllocatedBuffer,
+    uniform_buffer: buffer::Allocated,
     frames_in_flight: usize,
     last_frames_in_flight: usize,
     last_vsync: bool,
-    frame_number: u64,
-    image_loader: ImageLoader,
+    frame_number: usize,
+    image_loader: image::Loader,
     #[allow(dead_code)]
     transfer_context: Arc<TransferContext>,
     last_time: std::time::Instant,
@@ -255,6 +267,7 @@ fn create_sync_objects(
 }
 
 impl App {
+    #[allow(clippy::too_many_lines)]
     fn new(opt: Opt) -> Self {
         let (sdl, mut window, event_pump) = create_window();
         let frames_in_flight = opt.frames_in_flight;
@@ -317,7 +330,7 @@ impl App {
             physical_device,
             *surface,
             format,
-            device.clone(),
+            &device,
             present_mode,
             None,
         );
@@ -327,7 +340,7 @@ impl App {
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = CommandPool::new(device.clone(), &command_pool_info, label!());
         let command_buffers =
-            create_command_buffers(&device, &command_pool, frames_in_flight as u32);
+            create_command_buffers(&device, &command_pool, frames_in_flight.try_into().unwrap());
         let render_pass = create_render_pass(device.clone(), format);
 
         let width = window.size().0;
@@ -345,9 +358,9 @@ impl App {
             heap_size_limits: None,
         };
 
-        let allocator = Arc::new(Allocator::new(allocator_info));
-        let depth_images = create_depth_images(allocator.clone(), width, height, frames_in_flight);
-        let depth_image_views = create_depth_image_views(device.clone(), &depth_images);
+        let allocator = Arc::new(Allocator::new(&allocator_info));
+        let depth_images = create_depth_images(&allocator, width, height, frames_in_flight);
+        let depth_image_views = create_depth_image_views(&device, &depth_images);
         let frame_buffers = create_framebuffers(
             &device,
             width,
@@ -404,7 +417,7 @@ impl App {
         let descriptor_sets = (0..frames_in_flight)
             .map(|i| {
                 create_descriptor_sets(
-                    device.clone(),
+                    &device,
                     &mut descriptor_set_manager,
                     &global_set_layout,
                     &uniform_buffer,
@@ -442,8 +455,8 @@ impl App {
         let cleanup = (0..frames_in_flight).map(|_| None).collect();
         let frames = Frames {
             present_semaphores,
-            render_semaphores,
             render_fences,
+            render_semaphores,
             command_buffers,
             depth_images,
             depth_image_views,
@@ -501,7 +514,7 @@ impl App {
         });
         let show_fps = false;
         let egui = None;
-        let image_loader = ImageLoader {
+        let image_loader = image::Loader {
             device: device.clone(),
             transfer_context: transfer_context.clone(),
             allocator: allocator.clone(),
@@ -595,6 +608,7 @@ impl App {
         self.materials.len() - 1
     }
     /// returns whether a resize was necessary
+    #[allow(clippy::too_many_lines)]
     fn resize(&mut self) -> bool {
         let (w, h) = self.window.size();
         let num_frames_in_flight_changed = self.last_frames_in_flight != self.frames_in_flight;
@@ -605,8 +619,6 @@ impl App {
         {
             return false;
         }
-
-        dbg!(self.vsync);
         self.width = w;
         self.height = h;
         self.last_frames_in_flight = self.frames_in_flight;
@@ -623,8 +635,6 @@ impl App {
                 vk::PresentModeKHR::IMMEDIATE_KHR
             };
         }
-        println!("RESIZE RESIZE RESIZE RESIZE RESIZE");
-        dbg!(num_frames_in_flight_changed);
         unsafe {
             self.device.device_wait_idle().unwrap();
             self.device
@@ -664,7 +674,7 @@ impl App {
                 .zip(&self.frames.max_objects)
                 .map(|((_, object_buffer), max_objects)| {
                     create_descriptor_sets(
-                        self.device.clone(),
+                        &self.device,
                         &mut self.descriptor_set_manager,
                         &self.global_set_layout,
                         &self.uniform_buffer,
@@ -699,7 +709,7 @@ impl App {
             self.physical_device,
             *self.surface,
             self.format,
-            self.device.clone(),
+            &self.device,
             self.present_mode,
             Some(*self.swapchain),
         );
@@ -708,9 +718,9 @@ impl App {
         self.swapchain_image_views = swapchain_image_views;
         self.render_pass = create_render_pass(self.device.clone(), self.format);
         self.frames.depth_images =
-            create_depth_images(self.allocator.clone(), w, h, self.frames_in_flight);
+            create_depth_images(&self.allocator, w, h, self.frames_in_flight);
         self.frames.depth_image_views =
-            create_depth_image_views(self.device.clone(), &self.frames.depth_images);
+            create_depth_image_views(&self.device, &self.frames.depth_images);
         self.frame_buffers = create_framebuffers(
             &self.device,
             w,
@@ -723,7 +733,7 @@ impl App {
         self.frames.command_buffers = create_command_buffers(
             &self.device,
             &self.command_pool,
-            self.frames_in_flight as u32,
+            self.frames_in_flight.try_into().unwrap(),
         );
         true
     }
@@ -741,7 +751,7 @@ impl App {
     fn ui(&mut self) {
         let (width, height) = self.window.size();
         self.egui.as_mut().unwrap().run(
-            self.allocator.clone(),
+            &self.allocator,
             &self.image_loader,
             &mut self.descriptor_set_manager,
             &self.texture_set_layout,
@@ -752,8 +762,7 @@ impl App {
                     let dt = self
                         .last_frame_times
                         .get(self.last_frame_times.len() - 1)
-                        .map(|t| t.1)
-                        .unwrap_or(0.0);
+                        .map_or(0.0, |t| t.1);
                     ui.label(format!("{}ms", dt * 1000.0));
                     ui.label(format!("{}fps", 1.0 / dt));
                     ui.checkbox(&mut self.vsync, "Vsync");
@@ -796,7 +805,7 @@ impl App {
         );
     }
     fn update(&mut self, renderables: &[Renderable]) -> bool {
-        for event in self.event_pump.poll_iter().collect::<Vec<_>>().into_iter() {
+        for event in self.event_pump.poll_iter().collect::<Vec<_>>() {
             if self.mouse_captured {
                 self.input.process_event(&event);
             }
@@ -846,7 +855,19 @@ impl App {
         self.render(renderables);
         true
     }
+    #[allow(clippy::too_many_lines)]
     fn render(&mut self, renderables: &[Renderable]) {
+        #[derive(Debug)]
+        struct InstancingBatch<'a> {
+            pipeline: &'a RenderPipeline,
+            index_vertex_buffer: &'a buffer::Allocated,
+            index_count: u32,
+            index_start: u32,
+            instance_count: u32,
+            vertex_start: u32,
+            custom_set: &'a DescriptorSet,
+        }
+
         let now = std::time::Instant::now();
         let dt = now - self.last_time;
         let time = self.start.elapsed().as_secs_f32();
@@ -870,12 +891,12 @@ impl App {
             if self.resize() {
                 return;
             }
-            let frame_index = self.frame_number as usize % self.frames_in_flight;
+            let frame_index = self.frame_number % self.frames_in_flight;
             let frame = self.frames.get(frame_index);
             let gpu_wait_start = std::time::Instant::now();
             let res = self
                 .device
-                .wait_for_fences(&[**frame.render_fence], true, 5000000000);
+                .wait_for_fences(&[**frame.render_fence], true, 5_000_000_000);
             if res.raw == vk::Result::TIMEOUT {
                 dbg!(res.raw, "TIMEOUT");
                 std::process::exit(-1);
@@ -899,7 +920,7 @@ impl App {
             } else {
                 renderables.chain(&[])
             };
-            self.global_uniform.renderables_count = renderables.clone().count() as u32;
+            self.global_uniform.renderables_count = renderables.clone().count().try_into().unwrap();
 
             let frame = self.frames.get(frame_index);
             if let Some(f) = frame.cleanup.take() {
@@ -907,14 +928,14 @@ impl App {
             }
 
             let pre_render_processing_start = std::time::Instant::now();
-            if renderables_len * std::mem::size_of::<GpuDataRenderable>()
-                > frame.renderables_buffer.size as usize
+            if renderables_len as u64 * std::mem::size_of::<GpuDataRenderable>() as u64
+                > frame.renderables_buffer.size
             {
                 *frame.max_objects = (renderables_len / 2 * 3).max(16);
                 *frame.renderables_buffer =
                     create_renderables_buffer(self.allocator.clone(), *frame.max_objects as u64);
                 *frame.descriptor_set = create_descriptor_sets(
-                    self.device.clone(),
+                    &self.device,
                     &mut self.descriptor_set_manager,
                     &self.global_set_layout,
                     &self.uniform_buffer,
@@ -925,7 +946,7 @@ impl App {
             let swapchain_image_index = {
                 let res = self.device.acquire_next_image_khr(
                     *self.swapchain,
-                    1000000000,
+                    1_000_000_000,
                     Some(**frame.present_semaphore),
                     None,
                 );
@@ -945,12 +966,13 @@ impl App {
             let (width, height) = self.window.size();
 
             let ptr = self.uniform_buffer.map();
-            let global_uniform_offset = pad_uniform_buffer_size(
+            let global_uniform_offset: u32 = (pad_uniform_buffer_size(
                 &self.physical_device_properties.limits,
                 std::mem::size_of::<GlobalUniform>() as u64,
-            ) as usize
-                * frame_index;
-            let current_global_uniform_ptr = ptr.add(global_uniform_offset);
+            ) * frame_index as u64)
+                .try_into()
+                .unwrap();
+            let current_global_uniform_ptr = ptr.add(global_uniform_offset as usize);
             std::ptr::write(
                 current_global_uniform_ptr as *mut GlobalUniform,
                 self.global_uniform,
@@ -961,16 +983,6 @@ impl App {
             let mut last_pipeline = usize::MAX;
             let mut last_mesh = std::ptr::null();
             let mut indirect_draw = 0;
-            #[derive(Debug)]
-            struct InstancingBatch<'a> {
-                pipeline: &'a RenderPipeline,
-                index_vertex_buffer: &'a AllocatedBuffer,
-                index_count: u32,
-                index_start: u32,
-                instance_count: u32,
-                vertex_start: u32,
-                custom_set: &'a DescriptorSet,
-            }
             let meshes_len = renderables
                 .clone()
                 .fold((0, std::ptr::null()), |(mut i, last), r| {
@@ -982,7 +994,7 @@ impl App {
                 })
                 .0;
             let mesh_buffer_min_size = meshes_len * std::mem::size_of::<GpuMesh>();
-            if mesh_buffer_min_size > frame.mesh_buffer.size as usize {
+            if mesh_buffer_min_size as u64 > frame.mesh_buffer.size {
                 *frame.mesh_buffer =
                     create_mesh_buffer(self.allocator.clone(), mesh_buffer_min_size as u64 / 2 * 3);
                 *frame.mesh_set = create_mesh_buffer_set(
@@ -1000,7 +1012,7 @@ impl App {
             let mut custom_sets = Vec::new();
             let mut mesh_index = 0;
             let renderables_slice = std::slice::from_raw_parts_mut(
-                objects_ptr as *mut GpuDataRenderable,
+                objects_ptr.cast::<GpuDataRenderable>(),
                 renderables_len,
             );
             for (i, renderable) in renderables.clone().enumerate() {
@@ -1021,7 +1033,7 @@ impl App {
                         first_index: this_mesh.index_start,
                         min: this_mesh.bounds.min,
                         index_count: this_mesh.index_count,
-                        vertex_offset: this_mesh.vertex_start as i32,
+                        vertex_offset: this_mesh.vertex_start.try_into().unwrap(),
                         _padding_0: Default::default(),
                         _padding_1: Default::default(),
                         _padding_2: Default::default(),
@@ -1034,9 +1046,9 @@ impl App {
                     || this_buffer != last_buffer
                     || this_custom_set as *const DescriptorSet != last_custom_set
                 {
-                    debug_assert!((i as u32) & 0xFFFF0000 == 0);
                     renderables_slice[instancing_batches.len()].custom_id = 0;
-                    renderables_slice[instancing_batches.len()].first_instance = i as u32;
+                    renderables_slice[instancing_batches.len()].first_instance =
+                        i.try_into().unwrap();
                     instancing_batches.push(InstancingBatch {
                         pipeline: &self.materials[renderable.pipeline].as_ref().unwrap().0,
                         index_vertex_buffer: &this_mesh.buffer,
@@ -1054,11 +1066,12 @@ impl App {
                 renderables_slice[i].transform = renderable.transform;
                 renderables_slice[i].custom_id = renderable.custom_id;
                 renderables_slice[i].uncullable = if renderable.uncullable { 1 } else { 0 };
-                renderables_slice[i].mesh = mesh_index as u32 - 1;
-                let instancing_batch = instancing_batches.len() as u32 - 1;
+                renderables_slice[i].mesh = TryInto::<u32>::try_into(mesh_index).unwrap() - 1;
+                let instancing_batch =
+                    TryInto::<u32>::try_into(instancing_batches.len()).unwrap() - 1;
                 renderables_slice[i].draw = indirect_draw - 1;
                 renderables_slice[i].batch = instancing_batch;
-                renderables_slice[i].redirect = i as u32;
+                renderables_slice[i].redirect = i.try_into().unwrap();
                 instancing_batches.last_mut().unwrap().instance_count += 1;
             }
             frame.mesh_buffer.unmap();
@@ -1086,7 +1099,7 @@ impl App {
                 vk::ClearValue {
                     depth_stencil: vk::ClearDepthStencilValue {
                         depth: 1.0,
-                        ..Default::default()
+                        ..erupt::vk1_0::ClearDepthStencilValue::default()
                     },
                 },
             ];
@@ -1128,7 +1141,7 @@ impl App {
                     *batch.pipeline.pipeline_layout,
                     0,
                     &[**frame.descriptor_set, **batch.custom_set],
-                    &[global_uniform_offset as u32],
+                    &[global_uniform_offset],
                 );
 
                 self.device.cmd_draw_indexed(
@@ -1136,7 +1149,7 @@ impl App {
                     batch.index_count,
                     batch.instance_count,
                     batch.index_start,
-                    batch.vertex_start as i32,
+                    batch.vertex_start.try_into().unwrap(),
                     first_instance,
                 );
                 first_instance += batch.instance_count;
@@ -1159,7 +1172,7 @@ impl App {
                 .queue_submit(self.graphics_queue, &[submit], Some(**frame.render_fence))
                 .unwrap();
 
-            let image_indices = &[swapchain_image_index as u32];
+            let image_indices = &[swapchain_image_index.try_into().unwrap()];
             let swapchains = &[*self.swapchain];
             let wait_semaphores = &[**frame.render_semaphore];
             let present_info = vk::PresentInfoKHRBuilder::new()
@@ -1189,7 +1202,7 @@ impl Drop for App {
                         .collect::<Vec<_>>()
                         .as_slice(),
                     true,
-                    1000000000,
+                    1_000_000_000,
                 )
                 .unwrap();
             println!(label!("Waiting for Idle"));
@@ -1203,6 +1216,7 @@ impl Drop for App {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let opt = Opt::from_args();
     let mut app = App::new(opt);
@@ -1230,7 +1244,7 @@ fn main() {
         &[0, 1, 2, 2, 1, 0],
         app.allocator.clone(),
         &app.transfer_context,
-        app.device.clone(),
+        &app.device,
         true,
     );
     dbg!("suzanne");
@@ -1238,7 +1252,7 @@ fn main() {
         app.allocator.clone(),
         "./assets/suzanne.obj",
         &app.transfer_context,
-        app.device.clone(),
+        &app.device,
     )
     .unwrap()
     .swap_remove(0);
@@ -1246,15 +1260,15 @@ fn main() {
         [&mut suzanne_mesh, &mut triangle_mesh],
         app.allocator.clone(),
         &app.transfer_context,
-        app.device.clone(),
+        &app.device,
     );
-    let image = AllocatedImage::open(
+    let image = image::Allocated::open(
         &app.image_loader,
         &PathBuf::from("./assets/lost_empire-RGBA.png"),
     );
     let mut renderables = Vec::new();
-    let texture = Arc::new(Texture::new(
-        app.device().clone(),
+    let texture = Arc::new(image::Texture::new(
+        &app.device().clone(),
         &mut app.descriptor_set_manager,
         &app.texture_set_layout,
         image,
@@ -1285,7 +1299,7 @@ fn main() {
         app.allocator.clone(),
         "./assets/lost_empire.obj",
         &app.transfer_context,
-        app.device.clone(),
+        &app.device,
     )
     .unwrap();
     dbg!("empire");
@@ -1313,7 +1327,7 @@ fn main() {
         * cgmath::Matrix4::from_scale(4.0);
     renderables.push(triangle);
 
-    for mut empire in empire.into_iter() {
+    for mut empire in empire {
         empire.transform = cgmath::Matrix4::from_translation(cgmath::Vector3::new(0.0, 0.0, 0.0));
         renderables.push(empire);
     }
@@ -1395,8 +1409,8 @@ fn mesh_pipeline(device: Arc<Device>) -> MaterialLoadFn {
             )
         };
         RenderPipeline {
-            pipeline,
             pipeline_layout,
+            pipeline,
         }
     })
 }

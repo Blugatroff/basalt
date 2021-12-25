@@ -27,7 +27,7 @@ impl<'a> Drop for DescriptorSetLayout {
     fn drop(&mut self) {
         unsafe {
             self.device
-                .destroy_descriptor_set_layout(Some(self.layout), None)
+                .destroy_descriptor_set_layout(Some(self.layout), None);
         }
     }
 }
@@ -73,12 +73,14 @@ impl DescriptorSetLayout {
             let layout_binding_flags = vk::DescriptorSetLayoutBindingFlagsCreateInfoBuilder::new()
                 .binding_flags(layout_binding_flags)
                 .build();
-            create_info.p_next = &layout_binding_flags as *const _ as *const _;
+            create_info.p_next = (&layout_binding_flags
+                as *const vk::DescriptorSetLayoutBindingFlagsCreateInfo)
+                .cast();
         }
         let layout = unsafe { device.create_descriptor_set_layout(&create_info, None) }.unwrap();
         Self {
-            device,
             layout,
+            device,
             bindings,
         }
     }
@@ -155,7 +157,7 @@ impl DescriptorPool {
     pub fn free_set(&self) {
         let active = self.active.fetch_sub(1, Ordering::SeqCst) - 1;
         if active == 0 {
-            self.reset()
+            self.reset();
         }
     }
     pub fn free_slots_remaining(&self) -> u32 {
@@ -194,7 +196,7 @@ impl DescriptorPool {
         {
             count.store(starting_count.load(Ordering::SeqCst), Ordering::SeqCst);
         }
-        unsafe { self.device.reset_descriptor_pool(self.pool, None) }.unwrap()
+        unsafe { self.device.reset_descriptor_pool(self.pool, None) }.unwrap();
     }
 }
 
@@ -219,7 +221,7 @@ impl DescriptorSetManager {
         for pool in &self.pools {
             if pool.check_for_space(&set_layout.bindings) {
                 return DescriptorSet::allocate(
-                    self.device.clone(),
+                    &self.device,
                     set_layout,
                     pool.clone(),
                     variable_info,
@@ -256,7 +258,7 @@ pub struct DescriptorSet {
 
 impl DescriptorSet {
     pub fn allocate(
-        device: Arc<Device>,
+        device: &Arc<Device>,
         set_layout: &DescriptorSetLayout,
         pool: Arc<DescriptorPool>,
         variable_info: Option<&vk::DescriptorSetVariableDescriptorCountAllocateInfo>,

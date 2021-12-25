@@ -1,9 +1,13 @@
-use crate::{handles::*, utils::immediate_submit, TransferContext};
+use crate::{
+    handles::{Allocator, Device},
+    utils::immediate_submit,
+    TransferContext,
+};
 use erupt::vk;
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub struct AllocatedBuffer {
+pub struct Allocated {
     buffer: vk::Buffer,
     allocation: vk_mem_erupt::Allocation,
     allocator: Arc<Allocator>,
@@ -12,7 +16,7 @@ pub struct AllocatedBuffer {
     name: &'static str,
 }
 
-impl AllocatedBuffer {
+impl Allocated {
     pub fn new(
         allocator: Arc<Allocator>,
         buffer_info: vk::BufferCreateInfo,
@@ -23,7 +27,7 @@ impl AllocatedBuffer {
         let vmaalloc_info = vk_mem_erupt::AllocationCreateInfo {
             usage,
             required_flags: required_memory_properties,
-            ..Default::default()
+            ..vk_mem_erupt::AllocationCreateInfo::default()
         };
         assert!(buffer_info.size > 0);
         let (buffer, allocation, _) = allocator
@@ -32,12 +36,12 @@ impl AllocatedBuffer {
         let size = buffer_info.size;
         let usage = buffer_info.usage;
         Self {
-            allocator,
             buffer,
             allocation,
+            allocator,
             size,
-            name,
             usage,
+            name,
         }
     }
     pub fn map(&self) -> *const u8 {
@@ -49,10 +53,10 @@ impl AllocatedBuffer {
 
     pub fn copy_to_device_local(
         &self,
-        device: Arc<Device>,
+        device: &Arc<Device>,
         transfer_context: &TransferContext,
         usage: vk::BufferUsageFlags,
-    ) -> AllocatedBuffer {
+    ) -> Allocated {
         let buffer_info = vk::BufferCreateInfoBuilder::new()
             .size(self.size)
             .usage(usage | vk::BufferUsageFlags::TRANSFER_DST);
@@ -60,11 +64,11 @@ impl AllocatedBuffer {
             self.allocator.clone(),
             *buffer_info,
             vk_mem_erupt::MemoryUsage::GpuOnly,
-            Default::default(),
+            erupt::vk1_0::MemoryPropertyFlags::default(),
             label!("MeshBuffer"),
         );
 
-        immediate_submit(&device, transfer_context, |cmd| unsafe {
+        immediate_submit(device, transfer_context, |cmd| unsafe {
             device.cmd_copy_buffer(
                 cmd,
                 **self,
@@ -73,21 +77,21 @@ impl AllocatedBuffer {
                     .dst_offset(0)
                     .src_offset(0)
                     .size(self.size)],
-            )
+            );
         });
         assert!(device_buffer.size >= self.size);
         device_buffer
     }
 }
 
-impl std::ops::Deref for AllocatedBuffer {
+impl std::ops::Deref for Allocated {
     type Target = vk::Buffer;
     fn deref(&self) -> &Self::Target {
         &self.buffer
     }
 }
 
-impl Drop for AllocatedBuffer {
+impl Drop for Allocated {
     fn drop(&mut self) {
         println!(
             "DROPPED Buffer! {} {} {:?}",
