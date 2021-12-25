@@ -256,7 +256,7 @@ impl Mesh {
         path: P,
         transfer_context: &TransferContext,
         device: Arc<Device>,
-    ) -> Vec<Self> {
+    ) -> Result<Vec<Self>, tobj::LoadError> {
         let (models, _) = tobj::load_obj(
             &path,
             &tobj::LoadOptions {
@@ -265,8 +265,7 @@ impl Mesh {
                 ignore_points: true,
                 ignore_lines: true,
             },
-        )
-        .unwrap();
+        )?;
         let mut meshes = models
             .into_iter()
             .map(|model| {
@@ -309,6 +308,6 @@ impl Mesh {
             })
             .collect::<Vec<_>>();
         Self::combine_meshes(meshes.iter_mut(), allocator, transfer_context, device);
-        meshes
+        Ok(meshes)
     }
 }

@@ -172,8 +172,11 @@ impl EruptEgui {
             let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
                 .set_layouts(&set_layouts)
                 .push_constant_ranges(&[]);
-            let pipeline_layout =
-                handles::PipelineLayout::new(params.device.clone(), &pipeline_layout_info);
+            let pipeline_layout = handles::PipelineLayout::new(
+                params.device.clone(),
+                &pipeline_layout_info,
+                label!("EguiPipelineLayout"),
+            );
             let view_port = create_full_view_port(width, height);
             let color_blend_attachment = vk::PipelineColorBlendAttachmentStateBuilder::new()
                 .color_write_mask(vk::ColorComponentFlags::all())
@@ -202,6 +205,7 @@ impl EruptEgui {
                     layout: *pipeline_layout,
                     depth_stencil: &depth_stencil_create_info(false, false, vk::CompareOp::LESS),
                 },
+                label!("EguiPipeline"),
             );
             RenderPipeline {
                 pipeline_layout,
@@ -218,7 +222,11 @@ impl EruptEgui {
             .address_mode_u(address_mode)
             .address_mode_v(address_mode)
             .address_mode_w(address_mode);
-        let sampler = Arc::new(Sampler::new(app.device.clone(), &sampler));
+        let sampler = Arc::new(Sampler::new(
+            app.device.clone(),
+            &sampler,
+            label!("EguiSampler"),
+        ));
         Self {
             ctx: egui::CtxRef::default(),
             raw_input: Self::default_input(),
@@ -280,7 +288,13 @@ impl EruptEgui {
             .collect::<Vec<_>>();
         let width = texture.width as u32;
         let height = texture.height as u32;
-        let image = AllocatedImage::load(image_loader, &data, width, height);
+        let image = AllocatedImage::load(
+            image_loader,
+            &data,
+            width,
+            height,
+            label!("EguiTexture").into(),
+        );
         let texture = Texture::new(
             image_loader.device.clone(),
             descriptor_set_manager,

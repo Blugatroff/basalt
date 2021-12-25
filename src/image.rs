@@ -5,14 +5,15 @@ use crate::{
     utils::immediate_submit,
     TransferContext,
 };
-use erupt::vk::{self};
-use std::{path::Path, sync::Arc};
+use erupt::vk;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct AllocatedImage {
     image: vk::Image,
     allocation: vk_mem_erupt::Allocation,
     allocator: Arc<Allocator>,
+    name: String,
 }
 
 impl std::ops::Deref for AllocatedImage {
@@ -70,6 +71,7 @@ impl AllocatedImage {
         usage: vk::ImageUsageFlags,
         extent: vk::Extent3D,
         tiling: vk::ImageTiling,
+        name: String,
     ) -> Self {
         let info = Self::image_create_info(format, usage, extent, tiling);
         let allocation_info = vk_mem_erupt::AllocationCreateInfo {
@@ -82,20 +84,25 @@ impl AllocatedImage {
             image,
             allocator,
             allocation,
+            name,
         }
     }
-    pub fn open<P: AsRef<Path>>(image_loader: &ImageLoader, path: P) -> Self {
-        dbg!("OPENING IMAGE");
+    pub fn open(image_loader: &ImageLoader, path: &std::path::Path) -> Self {
         let image = image::open(path).unwrap();
         let image = image.into_rgba8();
         let width = image.width();
         let height = image.height();
         let image = image.into_raw();
-        dbg!(width, height);
-        dbg!(image.len());
-        Self::load(image_loader, &image, width, height)
+        let name = format!("{:?}", path);
+        Self::load(image_loader, &image, width, height, name)
     }
-    pub fn load(image_loader: &ImageLoader, data: &[u8], width: u32, height: u32) -> Self {
+    pub fn load(
+        image_loader: &ImageLoader,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        name: String,
+    ) -> Self {
         let image_size = width * height * 4;
         let image_format = vk::Format::R8G8B8A8_SRGB;
         assert_eq!(data.len() as u32, image_size);
@@ -125,6 +132,7 @@ impl AllocatedImage {
             vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
             image_extent,
             vk::ImageTiling::LINEAR,
+            name,
         );
 
         immediate_submit(
@@ -195,7 +203,7 @@ impl AllocatedImage {
 
 impl Drop for AllocatedImage {
     fn drop(&mut self) {
-        println!("DROPPED AllocatedImage!");
+        println!("DROPPED AllocatedImage! {}", self.name);
         self.allocator.destroy_image(self.image, &self.allocation);
     }
 }
@@ -221,7 +229,11 @@ impl Texture {
             **image,
             vk::ImageAspectFlags::COLOR,
         );
-        let view = Arc::new(ImageView::new(device.clone(), &image_view_create_info));
+        let view = Arc::new(ImageView::new(
+            device.clone(),
+            &image_view_create_info,
+            label!("TextureImageView"),
+        ));
         let mut set = descriptor_set_manager.allocate(texture_set_layout, None);
         let image_info = vk::DescriptorImageInfoBuilder::new()
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)

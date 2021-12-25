@@ -57,37 +57,24 @@ impl MyInto<vk::DescriptorType> for spirv_reflect::types::ReflectDescriptorType 
 pub struct ShaderModule {
     module: vk::ShaderModule,
     device: Arc<Device>,
+    name: String,
 }
 impl ShaderModule {
-    pub fn load(
-        device: Arc<Device>,
-        path: impl AsRef<std::path::Path>,
-    ) -> Result<Self, std::io::Error> {
+    pub fn load(device: Arc<Device>, path: &'static str) -> Result<Self, std::io::Error> {
         let mut data = Vec::new();
         let len = std::fs::File::open(path)?.read_to_end(&mut data)?;
-        Ok(Self::new(device, &data[0..len]))
+        Ok(Self::new(device, &data[0..len], path.into()))
     }
-    pub fn new(device: Arc<Device>, spv: &[u8]) -> Self {
+    pub fn new(device: Arc<Device>, spv: &[u8], name: String) -> Self {
         assert!(spv.len() % 4 == 0);
         let code = unsafe { std::slice::from_raw_parts(spv.as_ptr() as *const u32, spv.len() / 4) };
         let create_info = vk::ShaderModuleCreateInfoBuilder::new().code(code);
         let module = unsafe { device.create_shader_module(&create_info, None) }.unwrap();
-        /* let reflect = spirv_reflect::ShaderModule::load_u32_data(code).unwrap();
-        let descriptor_bindings = reflect.enumerate_descriptor_bindings(Some("main")).unwrap();
-        let stage = reflect.get_shader_stage();
-        //dbg!(reflect.enumerate_input_variables(Some("main"))).unwrap();
-        let bindings = descriptor_bindings
-        .into_iter()
-        .map(|binding| crate::DescriptorSetLayoutBinding {
-            binding: binding.binding,
-            count: binding.count,
-            ty: binding.descriptor_type.my_into(),
-            stage_flags: vk::ShaderStageFlags::from_bits(stage.bits()).unwrap(),
-            immutable_samplers: None,
-        })
-        .collect::<Vec<_>>(); */
-        //dbg!(bindings);
-        Self { module, device }
+        Self {
+            module,
+            device,
+            name,
+        }
     }
 }
 
@@ -101,7 +88,7 @@ impl std::ops::Deref for ShaderModule {
 
 impl Drop for ShaderModule {
     fn drop(&mut self) {
-        println!("DROPPED ShaderModule!");
+        println!("DROPPED ShaderModule! {}", self.name);
         unsafe { self.device.destroy_shader_module(Some(self.module), None) };
     }
 }
@@ -223,37 +210,48 @@ impl Drop for ComputePipeline {
 pub struct Pipeline {
     pipeline: vk::Pipeline,
     device: Arc<Device>,
+    name: String,
 }
 
 impl Pipeline {
-    pub fn new(device: Arc<Device>, pass: vk::RenderPass, desc: PipelineDesc) -> Self {
-        let viewports = &[desc.view_port.into_builder()];
-        let scissors = &[desc.scissor];
-        let viewport_state = vk::PipelineViewportStateCreateInfoBuilder::new()
-            .viewports(viewports)
-            .scissors(scissors);
-        let attachments = &[desc.color_blend_attachment];
-        let color_blend_state_create_info = vk::PipelineColorBlendStateCreateInfoBuilder::new()
-            .logic_op_enable(false)
-            .logic_op(vk::LogicOp::COPY)
-            .attachments(attachments);
-        let pipeline_info = vk::GraphicsPipelineCreateInfoBuilder::new()
-            .stages(desc.shader_stages)
-            .vertex_input_state(desc.vertex_input_info)
-            .input_assembly_state(desc.input_assembly_state)
-            .viewport_state(&viewport_state)
-            .rasterization_state(desc.rasterization_state)
-            .multisample_state(desc.multisample_state)
-            .color_blend_state(&color_blend_state_create_info)
-            .layout(desc.layout)
-            .render_pass(pass)
-            .depth_stencil_state(desc.depth_stencil)
-            .subpass(0);
+    pub fn new(
+        device: Arc<Device>,
+        pass: vk::RenderPass,
+        desc: PipelineDesc,
+        name: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        fn new(device: &Device, pass: vk::RenderPass, desc: PipelineDesc) -> vk::Pipeline {
+            let viewports = &[desc.view_port.into_builder()];
+            let scissors = &[desc.scissor];
+            let viewport_state = vk::PipelineViewportStateCreateInfoBuilder::new()
+                .viewports(viewports)
+                .scissors(scissors);
+            let attachments = &[desc.color_blend_attachment];
+            let color_blend_state_create_info = vk::PipelineColorBlendStateCreateInfoBuilder::new()
+                .logic_op_enable(false)
+                .logic_op(vk::LogicOp::COPY)
+                .attachments(attachments);
+            let pipeline_info = vk::GraphicsPipelineCreateInfoBuilder::new()
+                .stages(desc.shader_stages)
+                .vertex_input_state(desc.vertex_input_info)
+                .input_assembly_state(desc.input_assembly_state)
+                .viewport_state(&viewport_state)
+                .rasterization_state(desc.rasterization_state)
+                .multisample_state(desc.multisample_state)
+                .color_blend_state(&color_blend_state_create_info)
+                .layout(desc.layout)
+                .render_pass(pass)
+                .depth_stencil_state(desc.depth_stencil)
+                .subpass(0);
 
-        let pipeline =
-            unsafe { device.create_graphics_pipelines(None, &[pipeline_info], None) }.unwrap()[0];
-
-        Self { device, pipeline }
+            unsafe { device.create_graphics_pipelines(None, &[pipeline_info], None) }.unwrap()[0]
+        }
+        Self {
+            pipeline: new(&device, pass, desc),
+            device,
+            name,
+        }
     }
 }
 
@@ -267,7 +265,7 @@ impl std::ops::Deref for Pipeline {
 impl Drop for Pipeline {
     fn drop(&mut self) {
         unsafe {
-            println!("DROPPED Pipeline!");
+            println!("DROPPED Pipeline! {}", self.name);
             self.device.destroy_pipeline(Some(self.pipeline), None);
         }
     }
@@ -308,12 +306,18 @@ macro_rules! handle {
         pub struct $name {
             inner: $t,
             device: Arc<Device>,
+            name: String,
         }
 
         impl $name {
-            pub fn new<'a>(device: Arc<Device>, info: &$info) -> Self {
+            pub fn new<'a>(device: Arc<Device>, info: &$info, name: impl Into<String>) -> Self {
                 let inner = $create(&device, info);
-                Self { inner, device }
+                let name = name.into();
+                Self {
+                    inner,
+                    device,
+                    name,
+                }
             }
         }
 
@@ -326,7 +330,7 @@ macro_rules! handle {
 
         impl Drop for $name {
             fn drop(&mut self) {
-                println!(concat!("DROPPED ", stringify!($name), "!"));
+                println!(concat!("DROPPED ", stringify!($name), "! {}"), self.name);
                 $destroy(&self.device, self.inner)
             }
         }

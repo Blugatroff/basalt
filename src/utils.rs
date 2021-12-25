@@ -261,6 +261,7 @@ pub fn create_depth_images(
                 usage,
                 extent,
                 vk::ImageTiling::OPTIMAL,
+                label!("DepthImage").into(),
             )
         })
         .collect()
@@ -274,7 +275,7 @@ pub fn create_depth_image_views(device: Arc<Device>, images: &[AllocatedImage]) 
                 **image,
                 vk::ImageAspectFlags::DEPTH,
             );
-            ImageView::new(device.clone(), &info)
+            ImageView::new(device.clone(), &info, label!("DepthImageView"))
         })
         .collect::<Vec<ImageView>>()
 }
@@ -391,7 +392,7 @@ pub fn create_render_pass(device: Arc<Device>, format: vk::SurfaceFormatKHR) -> 
         .attachments(attachments)
         .subpasses(subpasses);
 
-    RenderPass::new(device, &render_pass_info)
+    RenderPass::new(device, &render_pass_info, label!("MainRenderPass"))
 }
 pub fn create_swapchain(
     instance: &InstanceLoader,
@@ -427,7 +428,7 @@ pub fn create_swapchain(
             None => vk::SwapchainKHR::null(),
         });
 
-    let swapchain = Swapchain::new(device.clone(), &swapchain_info);
+    let swapchain = Swapchain::new(device.clone(), &swapchain_info, label!());
     let swapchain_images = unsafe { device.get_swapchain_images_khr(*swapchain, None) }
         .unwrap()
         .to_vec();
@@ -455,7 +456,11 @@ pub fn create_swapchain(
                         .layer_count(1)
                         .build(),
                 );
-            ImageView::new(device.clone(), &image_view_info)
+            ImageView::new(
+                device.clone(),
+                &image_view_info,
+                label!("SwapchainImageView"),
+            )
         })
         .collect();
     (swapchain, swapchain_images, swapchain_image_views)
@@ -484,7 +489,11 @@ pub fn create_framebuffers(
         .iter()
         .map(|attachments| {
             framebuffer_info = framebuffer_info.attachments(attachments);
-            Framebuffer::new(device.clone(), &framebuffer_info)
+            Framebuffer::new(
+                device.clone(),
+                &framebuffer_info,
+                label!("SwapchainFrameBuffer"),
+            )
         })
         .collect::<Vec<_>>()
 }
@@ -678,20 +687,6 @@ pub fn create_renderables_buffer(allocator: Arc<Allocator>, max_objects: u64) ->
     )
 }
 
-pub fn create_object_set_layout(device: Arc<Device>) -> DescriptorSetLayout {
-    DescriptorSetLayout::new(
-        device,
-        vec![DescriptorSetLayoutBinding {
-            binding: 0,
-            count: 1,
-            ty: vk::DescriptorType::STORAGE_BUFFER,
-            stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
-            immutable_samplers: None,
-        }],
-        None,
-    )
-}
-
 pub fn immediate_submit<F>(device: &Device, transfer_context: &TransferContext, f: F)
 where
     F: FnOnce(vk::CommandBuffer),
@@ -724,24 +719,6 @@ where
             .reset_command_pool(*transfer_context.command_pool, None)
             .unwrap();
     }
-}
-
-pub fn create_textures_set_layout(
-    device: &Arc<Device>,
-    views_number: usize,
-    sampler: &Sampler,
-) -> DescriptorSetLayout {
-    DescriptorSetLayout::new(
-        device.clone(),
-        vec![DescriptorSetLayoutBinding {
-            binding: 0,
-            count: views_number as u32,
-            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            stage_flags: vk::ShaderStageFlags::FRAGMENT,
-            immutable_samplers: Some(vec![**sampler; views_number]),
-        }],
-        Some(&[vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT]),
-    )
 }
 
 pub fn create_mesh_buffer_set(

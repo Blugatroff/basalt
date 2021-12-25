@@ -10,13 +10,17 @@ use std::{
     collections::VecDeque,
     ffi::{c_void, CStr},
     os::raw::c_char,
+    path::PathBuf,
     sync::Arc,
 };
 const LAYER_KHRONOS_VALIDATION: *const c_char = cstr!("VK_LAYER_KHRONOS_validation");
 
 macro_rules! label {
     ( $name:expr ) => {
-        concat!(file!(), ":", line!(), " -> ", $name)
+        concat!(label!(), " -> ", $name)
+    };
+    ( ) => {
+        concat!(file!(), ":", line!())
     };
 }
 
@@ -225,15 +229,27 @@ fn create_sync_objects(
 ) -> (Vec<Fence>, Vec<Semaphore>, Vec<Semaphore>) {
     let fence_create_info = vk::FenceCreateInfoBuilder::new().flags(vk::FenceCreateFlags::SIGNALED);
     let render_fences = (0..num)
-        .map(|_| Fence::new(device.clone(), &fence_create_info))
+        .map(|_| Fence::new(device.clone(), &fence_create_info, label!("RenderFence")))
         .collect();
 
     let semaphore_create_info = vk::SemaphoreCreateInfoBuilder::new();
     let present_semaphores = (0..num)
-        .map(|_| Semaphore::new(device.clone(), &semaphore_create_info))
+        .map(|_| {
+            Semaphore::new(
+                device.clone(),
+                &semaphore_create_info,
+                label!("PresentSemaphore"),
+            )
+        })
         .collect();
     let render_semaphores = (0..num)
-        .map(|_| Semaphore::new(device.clone(), &semaphore_create_info))
+        .map(|_| {
+            Semaphore::new(
+                device.clone(),
+                &semaphore_create_info,
+                label!("RenderSemaphore"),
+            )
+        })
         .collect();
     (render_fences, present_semaphores, render_semaphores)
 }
@@ -309,7 +325,7 @@ impl App {
         let command_pool_info = vk::CommandPoolCreateInfoBuilder::new()
             .queue_family_index(graphics_queue_family)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        let command_pool = CommandPool::new(device.clone(), &command_pool_info);
+        let command_pool = CommandPool::new(device.clone(), &command_pool_info, label!());
         let command_buffers =
             create_command_buffers(&device, &command_pool, frames_in_flight as u32);
         let render_pass = create_render_pass(device.clone(), format);
@@ -372,7 +388,7 @@ impl App {
             .address_mode_u(address_mode)
             .address_mode_v(address_mode)
             .address_mode_w(address_mode);
-        let sampler = Sampler::new(device.clone(), &sampler);
+        let sampler = Sampler::new(device.clone(), &sampler, label!());
         let mut descriptor_set_manager = DescriptorSetManager::new(device.clone());
         let texture_set_layout = Arc::new(DescriptorSetLayout::new(
             device.clone(),
@@ -466,14 +482,18 @@ impl App {
             })
             .collect();
         let fence_info = vk::FenceCreateInfoBuilder::new().flags(vk::FenceCreateFlags::empty());
-        let fence = Fence::new(device.clone(), &fence_info);
+        let fence = Fence::new(device.clone(), &fence_info, label!("TransferContextFence"));
         let command_pool_info = vk::CommandPoolCreateInfoBuilder::new()
             .queue_family_index(transfer_queue_family)
             .flags(
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER
                     | vk::CommandPoolCreateFlags::TRANSIENT,
             );
-        let transfer_command_pool = CommandPool::new(device.clone(), &command_pool_info);
+        let transfer_command_pool = CommandPool::new(
+            device.clone(),
+            &command_pool_info,
+            label!("TransferContextCommandPool"),
+        );
         let transfer_context = Arc::new(TransferContext {
             transfer_queue,
             command_pool: transfer_command_pool,
@@ -1213,12 +1233,14 @@ fn main() {
         app.device.clone(),
         true,
     );
+    dbg!("suzanne");
     let mut suzanne_mesh = Mesh::load(
         app.allocator.clone(),
         "./assets/suzanne.obj",
         &app.transfer_context,
         app.device.clone(),
     )
+    .unwrap()
     .swap_remove(0);
     Mesh::combine_meshes(
         [&mut suzanne_mesh, &mut triangle_mesh],
@@ -1226,7 +1248,10 @@ fn main() {
         &app.transfer_context,
         app.device.clone(),
     );
-    let image = AllocatedImage::open(&app.image_loader, "./assets/lost_empire-RGBA.png");
+    let image = AllocatedImage::open(
+        &app.image_loader,
+        &PathBuf::from("./assets/lost_empire-RGBA.png"),
+    );
     let mut renderables = Vec::new();
     let texture = Arc::new(Texture::new(
         app.device().clone(),
@@ -1261,7 +1286,9 @@ fn main() {
         "./assets/lost_empire.obj",
         &app.transfer_context,
         app.device.clone(),
-    );
+    )
+    .unwrap();
+    dbg!("empire");
     let empire = empire_meshes.into_iter().map(|mesh| Renderable {
         mesh: Arc::new(mesh),
         pipeline: mesh_pipeline,
@@ -1302,7 +1329,6 @@ fn main() {
     }
 }
 fn mesh_pipeline(device: Arc<Device>) -> MaterialLoadFn {
-    dbg!("bla");
     let vert_shader = ShaderModule::load(device.clone(), "./shaders/mesh.vert.spv").unwrap();
     let frag_shader = ShaderModule::load(device, "./shaders/mesh.frag.spv").unwrap();
     Box::new(move |args| {
@@ -1315,7 +1341,11 @@ fn mesh_pipeline(device: Arc<Device>) -> MaterialLoadFn {
         let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
             .set_layouts(&set_layouts)
             .push_constant_ranges(&[]);
-        let pipeline_layout = PipelineLayout::new(args.device.clone(), &pipeline_layout_info);
+        let pipeline_layout = PipelineLayout::new(
+            args.device.clone(),
+            &pipeline_layout_info,
+            label!("MeshPipelineLayout"),
+        );
         let width = args.width;
         let height = args.height;
         let pipeline = {
@@ -1361,6 +1391,7 @@ fn mesh_pipeline(device: Arc<Device>) -> MaterialLoadFn {
                     layout: *pipeline_layout,
                     depth_stencil: &depth_stencil_create_info(true, true, vk::CompareOp::LESS),
                 },
+                String::from(label!("MeshPipeline")),
             )
         };
         RenderPipeline {
@@ -1391,7 +1422,11 @@ fn rgb_pipeline(device: Arc<Device>) -> MaterialLoadFn {
         let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
             .set_layouts(&set_layouts)
             .push_constant_ranges(&[]);
-        let pipeline_layout = PipelineLayout::new(args.device.clone(), &pipeline_layout_info);
+        let pipeline_layout = PipelineLayout::new(
+            args.device.clone(),
+            &pipeline_layout_info,
+            label!("RgbPipelineLayout"),
+        );
         let view_port = create_full_view_port(width, height);
         let color_blend_attachment = create_pipeline_color_blend_attachment_state();
         let pipeline = Pipeline::new(
@@ -1419,6 +1454,7 @@ fn rgb_pipeline(device: Arc<Device>) -> MaterialLoadFn {
                 layout: *pipeline_layout,
                 depth_stencil: &depth_stencil_create_info(true, true, vk::CompareOp::LESS),
             },
+            String::from(label!("RgbPipeline")),
         );
         RenderPipeline {
             pipeline_layout,

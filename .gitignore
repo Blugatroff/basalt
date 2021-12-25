@@ -4,3 +4,4 @@ shaders/*.spv
 .vscode/
 assets/
 .idea/
+target/
