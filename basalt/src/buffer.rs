@@ -50,7 +50,6 @@ impl Allocated {
     pub fn unmap(&self) {
         self.allocator.unmap_memory(&self.allocation);
     }
-
     pub fn copy_to_device_local(
         &self,
         device: &Arc<Device>,

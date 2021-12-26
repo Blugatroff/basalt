@@ -1,21 +1,9 @@
-#version 460
-
 layout (location = 0) in vec2 vPos;
 layout (location = 1) in vec2 vUv;
 layout (location = 2) in vec4 vColor;
 
 layout (location = 0) out vec4 color;
 layout (location = 1) out vec2 uv;
-
-layout(set = 0, binding = 0) uniform GlobalUniform {
-  mat4 view;
-  mat4 proj;
-  mat4 viewProj;
-  float time;
-  uint renderablesCount;
-  float screenWidth;
-  float screenHeight;
-} globalUniform;
 
 vec3 linear_from_srgb(vec3 srgb) {
     bvec3 cutoff = lessThan(srgb, vec3(10.31475));

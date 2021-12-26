@@ -1,6 +1,6 @@
-use crate::handles::Device;
+use crate::handles::{Device, Instance};
 use crate::image;
-use crate::{buffer, GpuDataRenderable};
+use crate::{buffer, shader_types};
 use crate::{
     debug_callback,
     descriptor_sets::{
@@ -9,7 +9,7 @@ use crate::{
     handles::{
         Allocator, CommandPool, Framebuffer, ImageView, RenderPass, ShaderModule, Swapchain,
     },
-    GlobalUniform, TransferContext, LAYER_KHRONOS_VALIDATION,
+    TransferContext, LAYER_KHRONOS_VALIDATION,
 };
 use erupt::{cstr, vk, DeviceLoader, InstanceLoader};
 use std::{
@@ -191,8 +191,10 @@ pub fn create_uniform_buffer(
     frames_in_flight: u64,
     limits: &vk::PhysicalDeviceLimits,
 ) -> buffer::Allocated {
-    let size = pad_uniform_buffer_size(limits, std::mem::size_of::<GlobalUniform>() as u64)
-        * frames_in_flight;
+    let size = pad_uniform_buffer_size(
+        limits,
+        std::mem::size_of::<shader_types::GlobalUniform>() as u64,
+    ) * frames_in_flight;
 
     buffer::Allocated::new(
         allocator,
@@ -211,13 +213,12 @@ pub fn create_descriptor_sets(
     layout: &DescriptorSetLayout,
     uniform_buffer: &buffer::Allocated,
     object_buffer: &buffer::Allocated,
-    max_objects: usize,
 ) -> DescriptorSet {
     let set = descriptor_set_manager.allocate(layout, None);
 
     let global_uniform_buffer_info = vk::DescriptorBufferInfoBuilder::new()
         .buffer(**uniform_buffer)
-        .range(std::mem::size_of::<GlobalUniform>() as u64);
+        .range(std::mem::size_of::<shader_types::GlobalUniform>() as u64);
     let global_uniform_buffer_info = &[global_uniform_buffer_info];
 
     let uniform_write = vk::WriteDescriptorSetBuilder::new()
@@ -228,7 +229,7 @@ pub fn create_descriptor_sets(
 
     let object_buffer_info = vk::DescriptorBufferInfoBuilder::new()
         .buffer(**object_buffer)
-        .range((std::mem::size_of::<cgmath::Matrix4<f32>>() * max_objects) as u64);
+        .range(object_buffer.size);
     let object_buffer_info = [object_buffer_info];
     let object_write = vk::WriteDescriptorSetBuilder::new()
         .dst_binding(1)
@@ -285,7 +286,7 @@ pub fn create_depth_image_views(
         .collect::<Vec<ImageView>>()
 }
 pub fn create_device_and_queue(
-    instance: &InstanceLoader,
+    instance: Arc<Instance>,
     graphics_queue_family: u32,
     transfer_queue_family: u32,
     device_extensions: &[*const i8],
@@ -323,8 +324,8 @@ pub fn create_device_and_queue(
         .cast::<std::ffi::c_void>();
 
     let device =
-        unsafe { DeviceLoader::new(instance, physical_device, &device_info, None) }.unwrap();
-    let device = Device::new(device);
+        unsafe { DeviceLoader::new(&instance, physical_device, &device_info, None) }.unwrap();
+    let device = Device::new(device, instance);
     let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
     let transfer_queue = unsafe { device.get_device_queue(transfer_queue_family, 0) };
     (device, graphics_queue, transfer_queue)
@@ -551,10 +552,8 @@ pub fn create_physical_device(
                 Some(queue_family) => queue_family.try_into().unwrap(),
                 None => return None,
             };
-            dbg!("GOT HERE");
             let features = instance.get_physical_device_features(physical_device);
             if features.multi_draw_indirect == vk::FALSE {
-                dbg!("NO MULTI DRAW INDIRECT");
                 return None;
             }
             //let features = instance.get_physical_device_features2(physical_device, None);
@@ -566,7 +565,6 @@ pub fn create_physical_device(
                         .contains(vk::QueueFlags::TRANSFER) && queue_family_properties
                         .queue_flags.contains(vk::QueueFlags::COMPUTE) && i != graphics_queue_family as usize
                 }).map(|i| i.try_into().unwrap());
-            dbg!((graphics_queue_family, transfer_queue));
             let formats = instance
                 .get_physical_device_surface_formats_khr(physical_device, surface, None)
                 .unwrap();
@@ -581,8 +579,6 @@ pub fn create_physical_device(
                 Some(surface_format) => *surface_format,
                 None => return None,
             };
-            dbg!("SURFACE IS SUPPORTED");
-
             let present_modes = instance
                 .get_physical_device_surface_present_modes_khr(physical_device, surface, None)
                 .unwrap().to_vec();
@@ -596,14 +592,12 @@ pub fn create_physical_device(
                 .unwrap();
             let device_extensions_supported = device_extensions.iter().all(|device_extension| {
                 let device_extension = CStr::from_ptr(*device_extension);
-                dbg!(device_extension);
-                dbg!(supported_device_extensions.iter().any(|properties| {
+                supported_device_extensions.iter().any(|properties| {
                     CStr::from_ptr(properties.extension_name.as_ptr()) == device_extension
-                }))
+                })
             });
 
             if !device_extensions_supported {
-                dbg!("EXTENSIONS NOT SUPPORTED");
                 return None;
             }
 
@@ -680,7 +674,7 @@ pub fn create_debug_messenger_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
 }
 
 pub fn create_renderables_buffer(allocator: Arc<Allocator>, max_objects: u64) -> buffer::Allocated {
-    let size = std::mem::size_of::<GpuDataRenderable>() as u64 * max_objects;
+    let size = std::mem::size_of::<shader_types::Object>() as u64 * max_objects;
     buffer::Allocated::new(
         allocator,
         *vk::BufferCreateInfoBuilder::new()

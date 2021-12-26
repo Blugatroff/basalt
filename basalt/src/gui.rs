@@ -1,5 +1,6 @@
 use crate::handles;
-use crate::App;
+use crate::shader_types;
+use crate::Renderer;
 use cgmath::SquareMatrix;
 use erupt::vk;
 use sdl2::event::Event;
@@ -16,7 +17,7 @@ use crate::{
         multisampling_state_create_info, pipeline_shader_stage_create_info,
         rasterization_state_create_info,
     },
-    GpuDataRenderable, RenderPipeline, Renderable,
+    Renderable,
 };
 
 enum KeyOrEvent {
@@ -98,7 +99,11 @@ impl EguiVertex {
                 .input_rate(vk::VertexInputRate::VERTEX),
             vk::VertexInputBindingDescriptionBuilder::new()
                 .binding(1)
-                .stride(std::mem::size_of::<GpuDataRenderable>().try_into().unwrap())
+                .stride(
+                    std::mem::size_of::<shader_types::Object>()
+                        .try_into()
+                        .unwrap(),
+                )
                 .input_rate(vk::VertexInputRate::INSTANCE),
         ];
         let attributes = vec![
@@ -140,7 +145,7 @@ pub struct EruptEgui {
     allocator: Arc<Allocator>,
 }
 impl EruptEgui {
-    pub fn new(app: &mut App, frames_in_flight: usize) -> Self {
+    pub fn new(app: &mut Renderer, frames_in_flight: usize) -> Self {
         let vert_shader =
             ShaderModule::load(app.device().clone(), "./shaders/egui.vert.spv").unwrap();
         let frag_shader =
@@ -162,21 +167,21 @@ impl EruptEgui {
             let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
                 .set_layouts(&set_layouts)
                 .push_constant_ranges(&[]);
-            let pipeline_layout = handles::PipelineLayout::new(
+            let pipeline_layout = Arc::new(handles::PipelineLayout::new(
                 params.device.clone(),
                 &pipeline_layout_info,
                 label!("EguiPipelineLayout"),
-            );
+            ));
             let view_port = create_full_view_port(width, height);
             let color_blend_attachment = vk::PipelineColorBlendAttachmentStateBuilder::new()
                 .color_write_mask(vk::ColorComponentFlags::all())
                 .blend_enable(true)
                 .src_color_blend_factor(vk::BlendFactor::ONE)
                 .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA);
-            let pipeline = Pipeline::new(
+            Pipeline::new(
                 params.device.clone(),
                 **params.render_pass,
-                PipelineDesc {
+                &PipelineDesc {
                     view_port,
                     scissor: vk::Rect2DBuilder::new()
                         .offset(vk::Offset2D { x: 0, y: 0 })
@@ -192,17 +197,13 @@ impl EruptEgui {
                     rasterization_state: &rasterization_state_create_info(vk::PolygonMode::FILL)
                         .cull_mode(vk::CullModeFlags::NONE),
                     multisample_state: &multisampling_state_create_info(),
-                    layout: *pipeline_layout,
+                    layout: Arc::clone(&pipeline_layout),
                     depth_stencil: &depth_stencil_create_info(false, false, vk::CompareOp::LESS),
                 },
                 label!("EguiPipeline"),
-            );
-            RenderPipeline {
-                pipeline_layout,
-                pipeline,
-            }
+            )
         }));
-        let buffers = (0..frames_in_flight)
+        let buffers = (0..=frames_in_flight)
             .map(|_| Arc::new(Self::create_buffer(app.allocator.clone())))
             .collect();
         let filter = vk::Filter::NEAREST;
@@ -243,9 +244,12 @@ impl EruptEgui {
         )
     }
     pub fn adjust_frames_in_flight(&mut self, frames_in_flight: usize) {
-        self.buffers.resize_with(frames_in_flight, || {
-            Arc::new(Self::create_buffer(self.allocator.clone()))
-        });
+        self.buffers = (0..=frames_in_flight)
+            .map(|_| Arc::new(Self::create_buffer(self.allocator.clone())))
+            .collect();
+    }
+    pub fn frames_in_flight(&self) -> usize {
+        self.buffers.len() - 1
     }
     fn default_input() -> egui::RawInput {
         egui::RawInput {

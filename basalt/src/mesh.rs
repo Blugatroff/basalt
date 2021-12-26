@@ -1,8 +1,9 @@
 use crate::buffer;
 use crate::handles::Allocator;
 use crate::handles::Device;
+use crate::shader_types;
 use crate::utils::{immediate_submit, round_to};
-use crate::{GpuDataRenderable, TransferContext};
+use crate::TransferContext;
 use erupt::vk;
 use std::sync::Arc;
 
@@ -30,7 +31,11 @@ impl Vertex {
                 .input_rate(vk::VertexInputRate::VERTEX),
             vk::VertexInputBindingDescriptionBuilder::new()
                 .binding(1)
-                .stride(std::mem::size_of::<GpuDataRenderable>().try_into().unwrap())
+                .stride(
+                    std::mem::size_of::<shader_types::Object>()
+                        .try_into()
+                        .unwrap(),
+                )
                 .input_rate(vk::VertexInputRate::INSTANCE),
         ];
         let attributes = vec![

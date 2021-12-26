@@ -93,11 +93,11 @@ impl Drop for ShaderModule {
 }
 
 #[derive(Debug)]
-pub struct Device(Arc<erupt::DeviceLoader>);
+pub struct Device(Arc<erupt::DeviceLoader>, Arc<Instance>);
 
 impl Device {
-    pub fn new(device: erupt::DeviceLoader) -> Self {
-        Self(Arc::new(device))
+    pub fn new(device: erupt::DeviceLoader, instance: Arc<Instance>) -> Self {
+        Self(Arc::new(device), instance)
     }
     pub fn raw(&self) -> Arc<erupt::DeviceLoader> {
         self.0.clone()
@@ -120,14 +120,17 @@ impl Drop for Device {
     }
 }
 
+#[derive(Debug)]
 pub struct Instance {
     instance: Arc<erupt::InstanceLoader>,
+    #[allow(dead_code)]
+    entry: erupt::EntryLoader,
 }
 
 impl Instance {
-    pub fn new(instance: erupt::InstanceLoader) -> Self {
+    pub fn new(instance: erupt::InstanceLoader, entry: erupt::EntryLoader) -> Self {
         let instance = Arc::new(instance);
-        Self { instance }
+        Self { instance, entry }
     }
     pub fn raw(&self) -> Arc<erupt::InstanceLoader> {
         self.instance.clone()
@@ -150,7 +153,7 @@ impl Drop for Instance {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PipelineDesc<'a> {
     pub view_port: vk::Viewport,
     pub scissor: vk::Rect2DBuilder<'a>,
@@ -160,7 +163,7 @@ pub struct PipelineDesc<'a> {
     pub input_assembly_state: &'a vk::PipelineInputAssemblyStateCreateInfo,
     pub rasterization_state: &'a vk::PipelineRasterizationStateCreateInfo,
     pub multisample_state: &'a vk::PipelineMultisampleStateCreateInfo,
-    pub layout: vk::PipelineLayout,
+    pub layout: Arc<PipelineLayout>,
     pub depth_stencil: &'a vk::PipelineDepthStencilStateCreateInfo,
 }
 
@@ -211,16 +214,17 @@ pub struct Pipeline {
     pipeline: vk::Pipeline,
     device: Arc<Device>,
     name: String,
+    layout: Arc<PipelineLayout>,
 }
 
 impl Pipeline {
     pub fn new(
         device: Arc<Device>,
         pass: vk::RenderPass,
-        desc: PipelineDesc,
+        desc: &PipelineDesc,
         name: impl Into<String>,
     ) -> Self {
-        fn new(device: &Device, pass: vk::RenderPass, desc: PipelineDesc) -> vk::Pipeline {
+        fn new(device: &Device, pass: vk::RenderPass, desc: &PipelineDesc) -> vk::Pipeline {
             let viewports = &[desc.view_port.into_builder()];
             let scissors = &[desc.scissor];
             let viewport_state = vk::PipelineViewportStateCreateInfoBuilder::new()
@@ -239,7 +243,7 @@ impl Pipeline {
                 .rasterization_state(desc.rasterization_state)
                 .multisample_state(desc.multisample_state)
                 .color_blend_state(&color_blend_state_create_info)
-                .layout(desc.layout)
+                .layout(**desc.layout)
                 .render_pass(pass)
                 .depth_stencil_state(desc.depth_stencil)
                 .subpass(0);
@@ -248,10 +252,14 @@ impl Pipeline {
         }
         let name = name.into();
         Self {
+            layout: Arc::clone(&desc.layout),
             pipeline: new(&device, pass, desc),
             device,
             name,
         }
+    }
+    pub fn layout(&self) -> &PipelineLayout {
+        &self.layout
     }
 }
 

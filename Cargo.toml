@@ -1,22 +1,9 @@
-[package]
-name = "basalt"
-version = "0.1.0"
-edition = "2021"
+[workspace]
 
-[dependencies]
-erupt = "0.20"
-vk-mem-erupt = "0.2.3"
-cgmath = "*"
-tobj = "*"
-structopt = "*"
-first-person-camera = { git = "https://github.com/Blugatroff/first-person-camera.git" }
-image = "*"
-spirv-reflect = "*"
-egui = "*"
-
-[dependencies.sdl2]
-version = "*"
-features = ["raw-window-handle"]
+members = [
+    "basalt",
+    "reflection"
+]
 
 #Set the default for dependencies.
 [profile.dev.package."*"]
@@ -25,3 +12,4 @@ opt-level = 3
 [profile.dev]
 # Turn on a small amount of optimisation in development mode.
 opt-level = 1
+

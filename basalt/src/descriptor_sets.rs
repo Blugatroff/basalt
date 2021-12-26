@@ -253,7 +253,7 @@ impl std::fmt::Debug for DescriptorSet {
 pub struct DescriptorSet {
     set: vk::DescriptorSet,
     pool: Arc<DescriptorPool>,
-    resources: Vec<Box<dyn Unpin>>,
+    resources: Vec<Box<dyn std::any::Any>>,
 }
 
 impl DescriptorSet {
@@ -279,7 +279,7 @@ impl DescriptorSet {
             resources,
         }
     }
-    pub fn attach_resources(&mut self, r: Box<dyn Unpin>) {
+    pub fn attach_resources(&mut self, r: Box<dyn std::any::Any>) {
         self.resources.push(r);
     }
 }

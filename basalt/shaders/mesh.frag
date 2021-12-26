@@ -1,19 +1,9 @@
-#version 450
-#extension GL_EXT_nonuniform_qualifier : enable
 layout (location = 0) in vec3 vPosition;
 layout (location = 1) in vec3 vNormal;
 layout (location = 2) in vec2 vUv;
 layout (location = 3) in flat uint texId;
 
 layout (location = 0) out vec4 outFragColor;
-
-layout(set = 0, binding = 0) uniform GlobalUniform {
-  mat4 view;
-  mat4 proj;
-  mat4 viewProj;
-  float time;
-} globalUniform;
-
 layout(set = 1, binding = 0) uniform sampler2D tex;
 
 void main() {

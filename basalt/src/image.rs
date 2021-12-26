@@ -242,6 +242,7 @@ impl Texture {
         unsafe { device.update_descriptor_sets(&[image_write], &[]) };
         set.attach_resources(Box::new(Arc::clone(&image)));
         set.attach_resources(Box::new(Arc::clone(&view)));
+        set.attach_resources(Box::new(Arc::clone(&sampler)));
         let set = Arc::new(set);
         Self {
             image,
