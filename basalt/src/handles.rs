@@ -33,47 +33,49 @@ pub trait MyInto<T> {
     fn my_into(self) -> T;
 }
 
-#[rustfmt::skip]
-impl MyInto<vk::DescriptorType> for spirv_reflect::types::ReflectDescriptorType {
-    fn my_into(self) -> vk::DescriptorType {
-        match self {
-            spirv_reflect::types::ReflectDescriptorType::Undefined => todo!(),
-            spirv_reflect::types::ReflectDescriptorType::Sampler => vk::DescriptorType::SAMPLER,
-            spirv_reflect::types::ReflectDescriptorType::CombinedImageSampler => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            spirv_reflect::types::ReflectDescriptorType::SampledImage | spirv_reflect::types::ReflectDescriptorType::StorageImage => vk::DescriptorType::SAMPLED_IMAGE,
-            spirv_reflect::types::ReflectDescriptorType::UniformTexelBuffer => vk::DescriptorType::UNIFORM_TEXEL_BUFFER,
-            spirv_reflect::types::ReflectDescriptorType::StorageTexelBuffer => vk::DescriptorType::STORAGE_TEXEL_BUFFER,
-            spirv_reflect::types::ReflectDescriptorType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
-            spirv_reflect::types::ReflectDescriptorType::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
-            spirv_reflect::types::ReflectDescriptorType::UniformBufferDynamic => vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-            spirv_reflect::types::ReflectDescriptorType::StorageBufferDynamic => vk::DescriptorType::STORAGE_BUFFER_DYNAMIC,
-            spirv_reflect::types::ReflectDescriptorType::InputAttachment => vk::DescriptorType::INPUT_ATTACHMENT,
-            spirv_reflect::types::ReflectDescriptorType::AccelerationStructureNV => vk::DescriptorType::ACCELERATION_STRUCTURE_NV,
-        }
-    }
-}
-
 pub struct ShaderModule {
     module: vk::ShaderModule,
     device: Arc<Device>,
     name: String,
+    shader: reflection::Shader,
+    stage: vk::ShaderStageFlags,
 }
 impl ShaderModule {
     pub fn load(device: Arc<Device>, path: &'static str) -> Result<Self, std::io::Error> {
         let mut data = Vec::new();
         let len = std::fs::File::open(path)?.read_to_end(&mut data)?;
-        Ok(Self::new(device, &data[0..len], path.into()))
+        let stage = if path.ends_with(".frag.spv") {
+            vk::ShaderStageFlags::FRAGMENT
+        } else if path.ends_with(".vert.spv") {
+            vk::ShaderStageFlags::VERTEX
+        } else if path.ends_with(".comp.spv") {
+            vk::ShaderStageFlags::COMPUTE
+        } else {
+            panic!()
+        };
+        Ok(Self::new(device, &data[0..len], path.into(), stage))
     }
-    pub fn new(device: Arc<Device>, spv: &[u8], name: String) -> Self {
+    pub fn stage(&self) -> vk::ShaderStageFlags {
+        self.stage
+    }
+    pub fn new(device: Arc<Device>, spv: &[u8], name: String, stage: vk::ShaderStageFlags) -> Self {
         assert!(spv.len() % 4 == 0);
         let code = unsafe { std::slice::from_raw_parts(spv.as_ptr().cast(), spv.len() / 4) };
         let create_info = vk::ShaderModuleCreateInfoBuilder::new().code(code);
         let module = unsafe { device.create_shader_module(&create_info, None) }.unwrap();
+        let mut shaders = reflection::Shader::from_spirv(spv).unwrap();
+        assert_eq!(shaders.len(), 1);
+        let shader = shaders.swap_remove(0);
         Self {
+            stage,
             module,
             device,
             name,
+            shader,
         }
+    }
+    pub fn reflection(&self) -> &reflection::Shader {
+        &self.shader
     }
 }
 

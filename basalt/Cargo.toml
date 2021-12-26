@@ -11,7 +11,7 @@ tobj = "*"
 structopt = "*"
 first-person-camera = { git = "https://github.com/Blugatroff/first-person-camera.git" }
 image = "*"
-spirv-reflect = "*"
+reflection = { path = "../reflection" }
 egui = "*"
 
 [dependencies.sdl2]

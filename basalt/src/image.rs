@@ -1,6 +1,7 @@
-use crate::buffer;
+use crate::descriptor_sets::DescriptorSetLayout;
+use crate::{buffer, descriptor_sets};
 use crate::{
-    descriptor_sets::{DescriptorSet, DescriptorSetLayout, DescriptorSetManager},
+    descriptor_sets::{DescriptorSet, DescriptorSetManager},
     handles::{Allocator, Device, ImageView, Sampler},
     utils::immediate_submit,
     TransferContext,
@@ -213,7 +214,6 @@ impl Texture {
     pub fn new(
         device: &Arc<Device>,
         descriptor_set_manager: &mut DescriptorSetManager,
-        texture_set_layout: &DescriptorSetLayout,
         image: Allocated,
         sampler: Arc<Sampler>,
     ) -> Self {
@@ -228,7 +228,18 @@ impl Texture {
             &image_view_create_info,
             label!("TextureImageView"),
         ));
-        let mut set = descriptor_set_manager.allocate(texture_set_layout, None);
+        let texture_set_layout = DescriptorSetLayout::new(
+            device.clone(),
+            vec![descriptor_sets::DescriptorSetLayoutBinding {
+                binding: 0,
+                count: 1,
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                immutable_samplers: None,
+                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+            }],
+            None,
+        );
+        let mut set = descriptor_set_manager.allocate(&texture_set_layout, None);
         let image_info = vk::DescriptorImageInfoBuilder::new()
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .image_view(**view)

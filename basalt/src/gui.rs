@@ -1,7 +1,6 @@
 use crate::handles;
 use crate::shader_types;
 use crate::Renderer;
-use cgmath::SquareMatrix;
 use erupt::vk;
 use sdl2::event::Event;
 use std::sync::Arc;
@@ -150,6 +149,15 @@ impl EruptEgui {
             ShaderModule::load(app.device().clone(), "./shaders/egui.vert.spv").unwrap();
         let frag_shader =
             ShaderModule::load(app.device().clone(), "./shaders/egui.frag.spv").unwrap();
+        let set_layouts: Vec<DescriptorSetLayout> = [
+            DescriptorSetLayout::from_shader(app.device(), &vert_shader),
+            DescriptorSetLayout::from_shader(app.device(), &frag_shader),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        dbg!(&set_layouts);
+
         let pipeline = app.register_pipeline(Box::new(move |params| {
             let vertex_description = EguiVertex::get_vertex_description();
             let width = params.width;
@@ -158,12 +166,10 @@ impl EruptEgui {
                 pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::VERTEX, &vert_shader),
                 pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::FRAGMENT, &frag_shader),
             ];
-            let mut set_layouts = params
-                .set_layouts
-                .into_iter()
+            let set_layouts = set_layouts
+                .iter()
                 .map(|l| **l)
                 .collect::<Vec<vk::DescriptorSetLayout>>();
-            set_layouts.push(**params.texture_set_layout);
             let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
                 .set_layouts(&set_layouts)
                 .push_constant_ranges(&[]);
@@ -272,7 +278,6 @@ impl EruptEgui {
         &mut self,
         image_loader: &Loader,
         descriptor_set_manager: &mut DescriptorSetManager,
-        texture_set_layout: &DescriptorSetLayout,
         texture: &egui::Texture,
     ) {
         let data = texture
@@ -292,7 +297,6 @@ impl EruptEgui {
         let texture = Texture::new(
             &image_loader.device,
             descriptor_set_manager,
-            texture_set_layout,
             image,
             self.sampler.clone(),
         );
@@ -303,7 +307,6 @@ impl EruptEgui {
         allocator: &Arc<Allocator>,
         image_loader: &Loader,
         descriptor_set_manager: &mut DescriptorSetManager,
-        texture_set_layout: &DescriptorSetLayout,
         window_size: (f32, f32),
         f: impl FnOnce(&egui::CtxRef),
     ) {
@@ -319,12 +322,7 @@ impl EruptEgui {
         let texture = self.ctx.fonts().texture();
         if texture.version != self.font_texture_version {
             self.font_texture_version = texture.version;
-            self.upload_font_texture(
-                image_loader,
-                descriptor_set_manager,
-                texture_set_layout,
-                &texture,
-            );
+            self.upload_font_texture(image_loader, descriptor_set_manager, &texture);
         }
         f(&self.ctx);
         let (output, shapes) = self.ctx.end_frame();
@@ -332,7 +330,7 @@ impl EruptEgui {
             return;
         }
         let clipped_meshes = self.ctx.tessellate(shapes);
-        self.last_mesh = self.draw(&clipped_meshes, allocator);
+        self.last_mesh = self.draw(&clipped_meshes, allocator, width, height);
     }
     pub fn renderables(&self) -> &[Renderable] {
         &self.last_mesh
@@ -341,10 +339,11 @@ impl EruptEgui {
         &mut self,
         clipped_meshes: &[egui::ClippedMesh],
         allocator: &Arc<Allocator>,
+        width: f32,
+        height: f32,
     ) -> Vec<Renderable> {
-        let font_texture = if let Some(font_texture) = self.texture.as_ref().map(|t| t.set.clone())
-        {
-            font_texture
+        let font_texture = if let Some(font_texture) = self.texture.as_ref() {
+            font_texture.set.clone()
         } else {
             return Vec::new();
         };
@@ -352,6 +351,8 @@ impl EruptEgui {
         let buffer = &mut self.buffers[self.frame % l];
         self.frame += 1;
         let mut offset = 0;
+        let transform = cgmath::Matrix4::from_translation(cgmath::Vector3::new(-1.0, -1.0, 0.0))
+            * cgmath::Matrix4::from_nonuniform_scale(2.0 / width, 2.0 / height, 1.0);
         'outer: loop {
             let mut meshes = Vec::new();
             for mesh in clipped_meshes.iter() {
@@ -400,8 +401,8 @@ impl EruptEgui {
                 meshes.push(Renderable {
                     mesh,
                     pipeline: self.pipeline,
-                    transform: cgmath::Matrix4::identity(),
-                    custom_set: texture,
+                    transform,
+                    custom_set: Some(texture),
                     custom_id: 0,
                     uncullable: true,
                 });

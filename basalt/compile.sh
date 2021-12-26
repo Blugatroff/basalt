@@ -16,9 +16,8 @@ compile $base/shaders/mesh.frag frag
 compile $base/shaders/egui.vert vert
 compile $base/shaders/egui.frag frag
 
-exit
 cd ../
-cargo run --bin reflection -- \
+cargo run --bin extract_structs -- \
     ./basalt/shaders/*.spv \
     > ./basalt/src/shader_types.rs
 

@@ -17,12 +17,12 @@ vec4 linear_from_srgba(vec4 srgba) {
 }
 
 void main() {
-    gl_Position = vec4(
-        2.0 * vPos.x / globalUniform.screenWidth - 1.0,
-        2.0 * vPos.y / globalUniform.screenHeight - 1.0, 
-        0.0, 
-        1.0
-    );
+    uint index = objectBuffer.objects[gl_InstanceIndex].redirect;
+    if (globalUniform.screenWidth > 100000) {
+        index = 00;    
+    }
+    Object object = objectBuffer.objects[index];
+    gl_Position = object.transform * vec4(vPos, 0.0, 1.0);
     uv = vUv;
     color = linear_from_srgba(vColor);
 }

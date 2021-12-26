@@ -97,15 +97,13 @@ struct Opt {
 pub struct Renderable {
     pub transform: cgmath::Matrix4<f32>,
     pub mesh: Arc<Mesh>,
-    pub custom_set: Arc<DescriptorSet>,
+    pub custom_set: Option<Arc<DescriptorSet>>,
     pub custom_id: u32,
     pub uncullable: bool,
     pub pipeline: usize,
 }
 
 struct PipelineCreationParams<'a> {
-    set_layouts: Vec<&'a DescriptorSetLayout>,
-    texture_set_layout: Arc<DescriptorSetLayout>,
     device: &'a Arc<Device>,
     width: u32,
     height: u32,
@@ -123,6 +121,19 @@ struct GpuMesh {
     _padding_0: u32,
     _padding_1: u32,
     _padding_2: u32,
+}
+
+#[derive(Debug)]
+struct InstancingBatch<'a> {
+    pipeline: &'a Pipeline,
+    index_vertex_buffer: &'a buffer::Allocated,
+    index_count: u32,
+    index_start: u32,
+    instance_count: u32,
+    vertex_start: u32,
+    renderables: Vec<&'a Renderable>,
+    custom_set: Option<&'a DescriptorSet>,
+    mesh: u32,
 }
 
 #[allow(dead_code)]
@@ -162,7 +173,6 @@ pub struct Renderer {
     graphics_queue: vk::Queue,
     messenger: Option<vk::DebugUtilsMessengerEXT>,
     descriptor_set_manager: DescriptorSetManager,
-    texture_set_layout: Arc<DescriptorSetLayout>,
     command_pool: CommandPool,
     frame_buffers: Vec<Framebuffer>,
     swapchain_images: Vec<vk::Image>,
@@ -431,8 +441,6 @@ impl Renderer {
                 std::thread::sleep(std::time::Duration::from_millis(50000));
                 (
                     f(PipelineCreationParams {
-                        set_layouts: vec![&global_set_layout],
-                        texture_set_layout: texture_set_layout.clone(),
                         device: &device,
                         width,
                         height,
@@ -482,7 +490,6 @@ impl Renderer {
             graphics_queue,
             messenger,
             descriptor_set_manager,
-            texture_set_layout,
             command_pool,
             frame_buffers,
             swapchain_images,
@@ -512,8 +519,6 @@ impl Renderer {
     }
     fn pipeline_creation_params(&self) -> PipelineCreationParams {
         PipelineCreationParams {
-            set_layouts: vec![&self.global_set_layout],
-            texture_set_layout: self.texture_set_layout.clone(),
             device: &self.device,
             width: self.width,
             height: self.height,
@@ -712,23 +717,27 @@ impl Renderer {
     ) -> (
         Vec<InstancingBatch<'a>>,
         Vec<Arc<Mesh>>,
-        Vec<Arc<DescriptorSet>>,
+        Vec<Option<Arc<DescriptorSet>>>,
     ) {
         let mut last_mesh: *const Mesh = std::ptr::null();
         let mut last_pipeline: Option<usize> = None;
         let mut last_custom_set: *const DescriptorSet = std::ptr::null();
         let mut batches: Vec<InstancingBatch> = Vec::new();
         let mut meshes: Vec<Arc<Mesh>> = Vec::new();
-        let mut custom_descriptor_sets: Vec<Arc<DescriptorSet>> = Vec::new();
+        let mut custom_descriptor_sets: Vec<Option<Arc<DescriptorSet>>> = Vec::new();
         for renderable in renderables {
             let this_mesh = &*renderable.mesh as *const Mesh;
             let this_pipeline = Some(renderable.pipeline);
-            let this_custom_set = &*renderable.custom_set as *const DescriptorSet;
+            let this_custom_set = renderable
+                .custom_set
+                .as_ref()
+                .map(|s| Arc::as_ptr(s))
+                .unwrap_or(std::ptr::null());
             if this_mesh != last_mesh {
                 meshes.push(Arc::clone(&renderable.mesh));
             }
             if this_custom_set != last_custom_set {
-                custom_descriptor_sets.push(Arc::clone(&renderable.custom_set));
+                custom_descriptor_sets.push(renderable.custom_set.as_ref().map(Arc::clone));
             }
             if this_mesh == last_mesh
                 && this_pipeline == last_pipeline
@@ -745,7 +754,7 @@ impl Renderer {
 
             let pipeline = &materials.get(renderable.pipeline).unwrap().0;
             batches.push(InstancingBatch {
-                custom_set: &*renderable.custom_set,
+                custom_set: renderable.custom_set.as_ref().map(|d| &**d),
                 index_count: renderable.mesh.index_count,
                 index_start: renderable.mesh.index_start,
                 index_vertex_buffer: &renderable.mesh.buffer,
@@ -941,15 +950,25 @@ impl Renderer {
                     **batch.pipeline,
                 );
 
-                self.device.cmd_bind_descriptor_sets(
-                    cmd,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    **batch.pipeline.layout(),
-                    0,
-                    &[**frame.descriptor_set, **batch.custom_set],
-                    &[global_uniform_offset],
-                );
-
+                if let Some(custom_set) = batch.custom_set {
+                    self.device.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        **batch.pipeline.layout(),
+                        0,
+                        &[**frame.descriptor_set, **custom_set],
+                        &[global_uniform_offset],
+                    );
+                } else {
+                    self.device.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        **batch.pipeline.layout(),
+                        0,
+                        &[**frame.descriptor_set],
+                        &[global_uniform_offset],
+                    );
+                };
                 self.device.cmd_draw_indexed(
                     cmd,
                     batch.index_count,
@@ -1128,8 +1147,8 @@ impl State {
                 uv: cgmath::Vector2::new(0.5, 0.0),
             },
         ];
-        let rgb_pipeline = renderer.register_pipeline(rgb_pipeline(renderer.device.clone()));
-        let mesh_pipeline = renderer.register_pipeline(mesh_pipeline(renderer.device().clone()));
+        let rgb_pipeline = renderer.register_pipeline(rgb_pipeline(renderer.device()));
+        let mesh_pipeline = renderer.register_pipeline(mesh_pipeline(renderer.device()));
         let mut triangle_mesh = Mesh::new(
             &vertices,
             &[0, 1, 2, 2, 1, 0],
@@ -1160,7 +1179,6 @@ impl State {
         let texture = Arc::new(image::Texture::new(
             &renderer.device().clone(),
             &mut renderer.descriptor_set_manager,
-            &renderer.texture_set_layout,
             image,
             renderer.sampler.clone(),
         ));
@@ -1168,7 +1186,7 @@ impl State {
             mesh: Arc::new(suzanne_mesh),
             pipeline: rgb_pipeline,
             transform: cgmath::Matrix4::identity(),
-            custom_set: texture.set.clone(),
+            custom_set: None,
             custom_id: 0,
             uncullable: false,
         };
@@ -1196,7 +1214,7 @@ impl State {
             mesh: Arc::new(mesh),
             pipeline: mesh_pipeline,
             transform: cgmath::Matrix4::identity(),
-            custom_set: texture.set.clone(),
+            custom_set: Some(texture.set.clone()),
             custom_id: 0,
             uncullable: false,
         });
@@ -1205,7 +1223,7 @@ impl State {
             mesh: Arc::new(triangle_mesh),
             pipeline: mesh_pipeline,
             transform: cgmath::Matrix4::from_scale(1.0),
-            custom_set: texture.set.clone(),
+            custom_set: Some(texture.set.clone()),
             custom_id: 0,
             uncullable: false,
         };
@@ -1262,7 +1280,6 @@ impl State {
             &self.renderer.allocator,
             &self.renderer.image_loader,
             &mut self.renderer.descriptor_set_manager,
-            &self.renderer.texture_set_layout,
             (width as f32, height as f32),
             |ctx| {
                 ctx.request_repaint();
@@ -1402,16 +1419,24 @@ fn main() {
         }
     }
 }
-fn mesh_pipeline(device: Arc<Device>) -> MaterialLoadFn {
+
+fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
     let vert_shader = ShaderModule::load(device.clone(), "./shaders/mesh.vert.spv").unwrap();
-    let frag_shader = ShaderModule::load(device, "./shaders/mesh.frag.spv").unwrap();
+    let frag_shader = ShaderModule::load(device.clone(), "./shaders/mesh.frag.spv").unwrap();
+    let set_layouts: Vec<DescriptorSetLayout> = [
+        DescriptorSetLayout::from_shader(device, &vert_shader),
+        DescriptorSetLayout::from_shader(device, &frag_shader),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    dbg!(&set_layouts);
+
     Box::new(move |args| {
-        let mut set_layouts = args
-            .set_layouts
+        let set_layouts = set_layouts
             .iter()
-            .map(|l| ***l)
+            .map(|l| **l)
             .collect::<Vec<vk::DescriptorSetLayout>>();
-        set_layouts.push(**args.texture_set_layout);
         let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
             .set_layouts(&set_layouts)
             .push_constant_ranges(&[]);
@@ -1465,10 +1490,19 @@ fn mesh_pipeline(device: Arc<Device>) -> MaterialLoadFn {
     })
 }
 
-fn rgb_pipeline(device: Arc<Device>) -> MaterialLoadFn {
+fn rgb_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
     let frag_shader =
         ShaderModule::load(device.clone(), "./shaders/rgb_triangle.frag.spv").unwrap();
-    let vert_shader = ShaderModule::load(device, "./shaders/rgb_triangle.vert.spv").unwrap();
+    let vert_shader =
+        ShaderModule::load(device.clone(), "./shaders/rgb_triangle.vert.spv").unwrap();
+    let set_layouts: Vec<DescriptorSetLayout> = [
+        DescriptorSetLayout::from_shader(device, &vert_shader),
+        DescriptorSetLayout::from_shader(device, &frag_shader),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
     let vertex_description = Vertex::get_vertex_description();
     Box::new(move |args| {
         let width = args.width;
@@ -1477,12 +1511,10 @@ fn rgb_pipeline(device: Arc<Device>) -> MaterialLoadFn {
             pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::VERTEX, &vert_shader),
             pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::FRAGMENT, &frag_shader),
         ];
-        let mut set_layouts = args
-            .set_layouts
-            .into_iter()
+        let set_layouts = set_layouts
+            .iter()
             .map(|l| **l)
             .collect::<Vec<vk::DescriptorSetLayout>>();
-        set_layouts.push(**args.texture_set_layout);
         let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
             .set_layouts(&set_layouts)
             .push_constant_ranges(&[]);
@@ -1517,16 +1549,4 @@ fn rgb_pipeline(device: Arc<Device>) -> MaterialLoadFn {
             String::from(label!("RgbPipeline")),
         )
     })
-}
-#[derive(Debug)]
-struct InstancingBatch<'a> {
-    pipeline: &'a Pipeline,
-    index_vertex_buffer: &'a buffer::Allocated,
-    index_count: u32,
-    index_start: u32,
-    instance_count: u32,
-    vertex_start: u32,
-    renderables: Vec<&'a Renderable>,
-    custom_set: &'a DescriptorSet,
-    mesh: u32,
 }

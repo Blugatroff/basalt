@@ -1,18 +1,5 @@
 #[repr(C)]
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-pub struct GlobalUniform {
-	pub view: ::cgmath::Matrix4<f32>,
-	pub proj: ::cgmath::Matrix4<f32>,
-	pub view_proj: ::cgmath::Matrix4<f32>,
-	pub time: f32,
-	pub renderables_count: u32,
-	pub screen_width: f32,
-	pub screen_height: f32,
-}
-
-#[repr(C)]
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ObjectBuffer {
 	pub objects: Vec<Object>,
@@ -31,6 +18,19 @@ pub struct Object {
 	pub custom_set: u32,
 	pub mesh: u32,
 	pub redirect: u32,
+}
+
+#[repr(C)]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalUniform {
+	pub view: ::cgmath::Matrix4<f32>,
+	pub proj: ::cgmath::Matrix4<f32>,
+	pub view_proj: ::cgmath::Matrix4<f32>,
+	pub time: f32,
+	pub renderables_count: u32,
+	pub screen_width: f32,
+	pub screen_height: f32,
 }
 
 

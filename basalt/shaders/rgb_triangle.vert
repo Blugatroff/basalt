@@ -7,7 +7,6 @@ layout(location = 0) out vec3 color;
 void main() {
   color = vNormal * 0.5 + 0.5;
   uint index = objectBuffer.objects[gl_InstanceIndex].redirect;
-  index = gl_InstanceIndex;
   Object object = objectBuffer.objects[index];
 
   vec4 worldPos = object.transform * vec4(vPosition, 1.0);

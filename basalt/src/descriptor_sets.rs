@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use crate::handles::Device;
+use crate::handles::{Device, ShaderModule};
 use erupt::vk;
 
 #[derive(Debug)]
@@ -41,13 +41,30 @@ pub struct DescriptorSetLayoutBinding {
     pub immutable_samplers: Option<Vec<vk::Sampler>>,
 }
 
+impl DescriptorSetLayoutBinding {
+    fn from_reflection(desc: &reflection::Descriptor, stage_flags: vk::ShaderStageFlags) -> Self {
+        let ty = match desc.ty {
+            reflection::DescriptorType::Uniform(_) => vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+            reflection::DescriptorType::Storage(_) => vk::DescriptorType::STORAGE_BUFFER,
+            reflection::DescriptorType::Sampler(_) => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        };
+        Self {
+            binding: desc.binding,
+            count: 1,
+            ty,
+            stage_flags,
+            immutable_samplers: None,
+        }
+    }
+}
+
 impl<'a> From<&'a DescriptorSetLayoutBinding> for vk::DescriptorSetLayoutBindingBuilder<'a> {
     fn from(val: &'a DescriptorSetLayoutBinding) -> Self {
         let mut builder = vk::DescriptorSetLayoutBindingBuilder::new()
             .binding(val.binding)
             .descriptor_type(val.ty)
             .stage_flags(val.stage_flags)
-            .descriptor_count(dbg!(val.count));
+            .descriptor_count(val.count);
         if let Some(samplers) = val.immutable_samplers.as_ref() {
             builder = builder.immutable_samplers(samplers);
         }
@@ -56,6 +73,23 @@ impl<'a> From<&'a DescriptorSetLayoutBinding> for vk::DescriptorSetLayoutBinding
 }
 
 impl DescriptorSetLayout {
+    pub fn from_shader(device: &Arc<Device>, shader: &ShaderModule) -> Vec<Self> {
+        let reflection = shader.reflection();
+        let mut sets: Vec<Vec<DescriptorSetLayoutBinding>> = Vec::new();
+        for descriptor in &reflection.descriptors {
+            let set = descriptor.set;
+            let descriptor =
+                DescriptorSetLayoutBinding::from_reflection(descriptor, shader.stage());
+            if let Some(set) = sets.get_mut(set as usize) {
+                set.push(descriptor);
+            } else {
+                sets.push(Vec::from([descriptor]));
+            }
+        }
+        sets.into_iter()
+            .map(|d| Self::new(device.clone(), d, None))
+            .collect()
+    }
     pub fn new(
         device: Arc<Device>,
         bindings: Vec<DescriptorSetLayoutBinding>,
@@ -217,7 +251,6 @@ impl DescriptorSetManager {
         set_layout: &DescriptorSetLayout,
         variable_info: Option<&vk::DescriptorSetVariableDescriptorCountAllocateInfo>,
     ) -> DescriptorSet {
-        dbg!(self.pools.len());
         for pool in &self.pools {
             if pool.check_for_space(&set_layout.bindings) {
                 return DescriptorSet::allocate(

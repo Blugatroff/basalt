@@ -9,7 +9,6 @@ layout (location = 3) out uint custom_set;
 
 void main() {
     uint index = objectBuffer.objects[gl_InstanceIndex].redirect;
-    index = gl_InstanceIndex;
     Object object = objectBuffer.objects[index];
     outPosition = (object.transform * vec4(vPosition, 1.0)).xyz;
     gl_Position = globalUniform.viewProj * object.transform * vec4(vPosition, 1.0f);
