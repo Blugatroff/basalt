@@ -198,7 +198,7 @@ impl Allocated {
 
 impl Drop for Allocated {
     fn drop(&mut self) {
-        println!("DROPPED AllocatedImage! {}", self.name);
+        log::info!("DROPPED AllocatedImage! {}", self.name);
         self.allocator.destroy_image(self.image, &self.allocation);
     }
 }

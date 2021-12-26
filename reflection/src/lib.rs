@@ -162,8 +162,7 @@ impl From<&spirq::Type> for Type {
             }
             spirq::Type::Sampler() => Self::Sampler,
             spirq::Type::SampledImage(_) => Self::SampledImage,
-            e => {
-                dbg!(e);
+            _ => {
                 unimplemented!()
             }
         }
@@ -285,7 +284,6 @@ impl Shader {
     pub fn from_spirv(spirv: &[u8]) -> Result<Vec<Self>, Box<dyn Error>> {
         let spirv = SpirvBinary::from(spirv);
         let entry_points = spirv.reflect_vec()?;
-        dbg!(&entry_points);
         Ok(entry_points.iter().map(Self::from).collect())
     }
 }

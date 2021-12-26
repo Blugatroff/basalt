@@ -17,7 +17,7 @@ impl Allocator {
 
 impl Drop for Allocator {
     fn drop(&mut self) {
-        println!("DROPPED Allocator!");
+        log::info!("DROPPED Allocator!");
         self.0.destroy();
     }
 }
@@ -67,11 +67,11 @@ impl ShaderModule {
         assert_eq!(shaders.len(), 1);
         let shader = shaders.swap_remove(0);
         Self {
-            stage,
             module,
             device,
             name,
             shader,
+            stage,
         }
     }
     pub fn reflection(&self) -> &reflection::Shader {
@@ -89,7 +89,7 @@ impl std::ops::Deref for ShaderModule {
 
 impl Drop for ShaderModule {
     fn drop(&mut self) {
-        println!("DROPPED ShaderModule! {}", self.name);
+        log::info!("DROPPED ShaderModule! {}", self.name);
         unsafe { self.device.destroy_shader_module(Some(self.module), None) };
     }
 }
@@ -115,7 +115,7 @@ impl std::ops::Deref for Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        println!("DROPPED Device!");
+        log::info!("DROPPED Device!");
         unsafe {
             self.0.destroy_device(None);
         }
@@ -148,7 +148,7 @@ impl std::ops::Deref for Instance {
 
 impl Drop for Instance {
     fn drop(&mut self) {
-        println!("DROPPED Instance!");
+        log::info!("DROPPED Instance!");
         unsafe {
             self.instance.destroy_instance(None);
         }
@@ -206,7 +206,7 @@ impl std::ops::Deref for ComputePipeline {
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
-        println!("DROPPED ComputePipeline!");
+        log::info!("DROPPED ComputePipeline!");
         unsafe { self.device.destroy_pipeline(Some(self.pipeline), None) };
     }
 }
@@ -275,7 +275,7 @@ impl std::ops::Deref for Pipeline {
 impl Drop for Pipeline {
     fn drop(&mut self) {
         unsafe {
-            println!("DROPPED Pipeline! {}", self.name);
+            log::info!("DROPPED Pipeline! {}", self.name);
             self.device.destroy_pipeline(Some(self.pipeline), None);
         }
     }
@@ -304,7 +304,7 @@ impl std::ops::Deref for Surface {
 impl Drop for Surface {
     fn drop(&mut self) {
         unsafe {
-            println!("DROPPED Surface!");
+            log::info!("DROPPED Surface!");
             self.instance.destroy_surface_khr(Some(self.surface), None);
         }
     }
@@ -340,7 +340,7 @@ macro_rules! handle {
 
         impl Drop for $name {
             fn drop(&mut self) {
-                println!(concat!("DROPPED ", stringify!($name), "! {}"), self.name);
+                ::log::info!(concat!("DROPPED ", stringify!($name), "! {}"), self.name);
                 $destroy(&self.device, self.inner)
             }
         }

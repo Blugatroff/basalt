@@ -156,7 +156,6 @@ impl EruptEgui {
         .into_iter()
         .flatten()
         .collect();
-        dbg!(&set_layouts);
 
         let pipeline = app.register_pipeline(Box::new(move |params| {
             let vertex_description = EguiVertex::get_vertex_description();

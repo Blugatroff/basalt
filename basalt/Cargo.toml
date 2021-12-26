@@ -13,6 +13,8 @@ first-person-camera = { git = "https://github.com/Blugatroff/first-person-camera
 image = "*"
 reflection = { path = "../reflection" }
 egui = "*"
+log = "0.4"
+pretty_env_logger = "0.4"
 
 [dependencies.sdl2]
 version = "*"

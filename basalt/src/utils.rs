@@ -137,18 +137,25 @@ pub fn create_instance(
         .map(|v| CString::new(v).unwrap())
         .collect();
     let needed_extensions: Vec<*const i8> = needed_extensions.iter().map(|v| v.as_ptr()).collect();
-    needed_extensions.iter().copied().for_each(|mut v| loop {
-        let c = unsafe { *v };
-        if c == 0 {
-            println!();
-            break;
+    let needed_extensions = needed_extensions.iter().copied().map(|mut v| {
+        let mut s = String::new();
+        loop {
+            let c = unsafe { *v };
+            if c == 0 {
+                break;
+            }
+            let c = TryInto::<u8>::try_into(c).unwrap() as char;
+            v = unsafe { (v).add(1) };
+            s.push(c);
         }
-        print!("{}", TryInto::<u8>::try_into(c).unwrap() as char);
-        v = unsafe { (v).add(1) };
+        s
     });
 
+    for extension in needed_extensions {
+        log::info!("required EXT: {}", extension);
+    }
     let entry = erupt::EntryLoader::new().unwrap();
-    println!(
+    log::info!(
         "Vulkan Instance {}.{}.{}",
         vk::api_version_major(entry.instance_version()),
         vk::api_version_minor(entry.instance_version()),

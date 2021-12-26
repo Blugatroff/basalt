@@ -92,9 +92,11 @@ impl std::ops::Deref for Allocated {
 
 impl Drop for Allocated {
     fn drop(&mut self) {
-        println!(
+        log::info!(
             "DROPPED Buffer! {} {} {:?}",
-            self.name, self.size, self.usage
+            self.name,
+            self.size,
+            self.usage
         );
         self.allocator.destroy_buffer(self.buffer, &self.allocation);
     }

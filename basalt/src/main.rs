@@ -67,18 +67,19 @@ unsafe extern "system" fn debug_callback(
     p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
     _p_user_data: *mut c_void,
 ) -> vk::Bool32 {
-    println!(
-        "{}",
-        CStr::from_ptr((*p_callback_data).p_message).to_string_lossy()
-    );
-    if message_severity.0
-        & (vk::DebugUtilsMessageSeverityFlagBitsEXT::ERROR_EXT.0
-            | vk::DebugUtilsMessageSeverityFlagBitsEXT::WARNING_EXT.0)
-        != 0
-    {
-        //std::process::exit(-1);
+    let msg = CStr::from_ptr((*p_callback_data).p_message).to_string_lossy();
+    if (message_severity.0 & vk::DebugUtilsMessageSeverityFlagBitsEXT::INFO_EXT.0) != 0 {
+        log::info!("{}", msg);
+    }
+    if (message_severity.0 & vk::DebugUtilsMessageSeverityFlagBitsEXT::WARNING_EXT.0) != 0 {
+        log::warn!("{}", msg);
         panic!();
     }
+    if (message_severity.0 & vk::DebugUtilsMessageSeverityFlagBitsEXT::ERROR_EXT.0) != 0 {
+        log::error!("{}", msg);
+        panic!();
+    }
+
     vk::FALSE
 }
 
@@ -280,7 +281,7 @@ impl Renderer {
             vk::PresentModeKHR::FIFO_KHR,
         );
 
-        println!("Using physical device: {:?}", unsafe {
+        log::info!("Using physical device: {:?}", unsafe {
             CStr::from_ptr(physical_device_properties.device_name.as_ptr())
         });
 
@@ -370,17 +371,6 @@ impl Renderer {
             .address_mode_w(address_mode);
         let sampler = Sampler::new(device.clone(), &sampler, label!());
         let mut descriptor_set_manager = DescriptorSetManager::new(device.clone());
-        let texture_set_layout = Arc::new(DescriptorSetLayout::new(
-            device.clone(),
-            vec![DescriptorSetLayoutBinding {
-                binding: 0,
-                count: 1,
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                stage_flags: vk::ShaderStageFlags::FRAGMENT,
-                immutable_samplers: None,
-            }],
-            None,
-        ));
         let descriptor_sets = (0..frames_in_flight)
             .map(|i| {
                 create_descriptor_sets(
@@ -1016,7 +1006,7 @@ impl Renderer {
                 .queue_present_khr(self.graphics_queue, &present_info)
         };
         if res.is_err() {
-            println!("{:#?}", res);
+            log::warn!("{:#?}", res);
         }
     }
     fn render(
@@ -1070,7 +1060,7 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
-            println!(label!("Waiting for Fences"));
+            log::info!(label!("Waiting for Fences"));
             self.device
                 .wait_for_fences(
                     self.frames
@@ -1083,13 +1073,13 @@ impl Drop for Renderer {
                     1_000_000_000,
                 )
                 .unwrap();
-            println!(label!("Waiting for Idle"));
+            log::info!(label!("Waiting for Idle"));
             self.device.device_wait_idle().unwrap();
             if self.messenger.is_some() {
                 self.instance
                     .destroy_debug_utils_messenger_ext(self.messenger, None);
             }
-            println!(label!("DROPPING App"));
+            log::info!(label!("DROPPING App"));
         };
     }
 }
@@ -1370,7 +1360,10 @@ impl State {
                     ..
                 } => match keycode {
                     sdl2::keyboard::Keycode::Z => {
-                        dbg!(Arc::strong_count(&self.renderer.device));
+                        log::info!(
+                            "Device reference count: {}",
+                            Arc::strong_count(&self.renderer.device)
+                        );
                     }
                     sdl2::keyboard::Keycode::V => {
                         self.vsync = true;
@@ -1412,6 +1405,7 @@ impl State {
 }
 
 fn main() {
+    pretty_env_logger::init();
     let mut state = State::new();
     loop {
         if !state.update() {
@@ -1430,7 +1424,6 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
     .into_iter()
     .flatten()
     .collect();
-    dbg!(&set_layouts);
 
     Box::new(move |args| {
         let set_layouts = set_layouts
