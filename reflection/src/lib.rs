@@ -1,6 +1,7 @@
-use std::error::Error;
-
+#![deny(clippy::all, clippy::pedantic)]
+#![allow(clippy::match_bool, clippy::missing_errors_doc)]
 use spirq::{EntryPoint, SpirvBinary};
+use std::error::Error;
 
 #[derive(Debug, Clone)]
 pub struct Shader {
@@ -117,8 +118,7 @@ impl std::fmt::Display for Type {
                 .unwrap_or_else(|| String::from("UnNamed")),
             Type::Array(ty) => format!("Vec<{}>", ty),
             Type::Matrix(ty, size) => format!("::cgmath::Matrix{}<{}>", size, ty),
-            Type::Sampler => unimplemented!(),
-            Type::SampledImage => unimplemented!(),
+            _ => unimplemented!(),
         })
     }
 }
@@ -200,9 +200,9 @@ pub enum DescriptorType {
 impl DescriptorType {
     fn ty(&self) -> &Type {
         match self {
-            DescriptorType::Uniform(ty) => ty,
-            DescriptorType::Storage(ty) => ty,
-            DescriptorType::Sampler(ty) => ty,
+            DescriptorType::Uniform(ty)
+            | DescriptorType::Storage(ty)
+            | DescriptorType::Sampler(ty) => ty,
         }
     }
 }
@@ -223,7 +223,7 @@ impl From<spirq::DescriptorResolution<'_>> for Descriptor {
         let ty = DescriptorType::from(descriptor.desc_ty);
         let set = descriptor.desc_bind.set();
         let binding = descriptor.desc_bind.bind();
-        Self { ty, set, binding }
+        Self { set, binding, ty }
     }
 }
 
@@ -261,7 +261,7 @@ impl From<&EntryPoint> for Shader {
             .map(|i| &i.ty)
             .chain(outputs.iter().map(|o| &o.ty))
             .chain(descriptors.iter().map(|d| d.ty.ty()))
-            .flat_map(|ty| ty.strukts())
+            .flat_map(Type::strukts)
             .fold(Vec::new(), |mut types, ty| {
                 if types.contains(ty) {
                     return types;
@@ -317,8 +317,7 @@ impl std::fmt::Display for Strukt {
                 "\n\tpub {}: {},",
                 &m.name
                     .as_deref()
-                    .map(camel_case_to_snake_case)
-                    .unwrap_or_else(|| String::from("_unnamed")),
+                    .map_or_else(|| String::from("_unnamed"), camel_case_to_snake_case),
                 m.ty
             ));
         }

@@ -137,6 +137,12 @@ struct InstancingBatch<'a> {
     mesh: u32,
 }
 
+struct BatchingResult<'a> {
+    batches: Vec<InstancingBatch<'a>>,
+    meshes: Vec<Arc<Mesh>>,
+    sets: Vec<Option<Arc<DescriptorSet>>>,
+}
+
 #[allow(dead_code)]
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -704,11 +710,7 @@ impl Renderer {
     fn batch_renderables<'a>(
         materials: &'a [(Pipeline, MaterialLoadFn)],
         renderables: impl IntoIterator<Item = &'a Renderable>,
-    ) -> (
-        Vec<InstancingBatch<'a>>,
-        Vec<Arc<Mesh>>,
-        Vec<Option<Arc<DescriptorSet>>>,
-    ) {
+    ) -> BatchingResult<'a> {
         let mut last_mesh: *const Mesh = std::ptr::null();
         let mut last_pipeline: Option<usize> = None;
         let mut last_custom_set: *const DescriptorSet = std::ptr::null();
@@ -721,8 +723,7 @@ impl Renderer {
             let this_custom_set = renderable
                 .custom_set
                 .as_ref()
-                .map(|s| Arc::as_ptr(s))
-                .unwrap_or(std::ptr::null());
+                .map_or(std::ptr::null(), Arc::as_ptr);
             if this_mesh != last_mesh {
                 meshes.push(Arc::clone(&renderable.mesh));
             }
@@ -744,7 +745,7 @@ impl Renderer {
 
             let pipeline = &materials.get(renderable.pipeline).unwrap().0;
             batches.push(InstancingBatch {
-                custom_set: renderable.custom_set.as_ref().map(|d| &**d),
+                custom_set: renderable.custom_set.as_deref(),
                 index_count: renderable.mesh.index_count,
                 index_start: renderable.mesh.index_start,
                 index_vertex_buffer: &renderable.mesh.buffer,
@@ -755,7 +756,11 @@ impl Renderer {
                 renderables: Vec::from([renderable]),
             });
         }
-        (batches, meshes, custom_descriptor_sets)
+        BatchingResult {
+            batches,
+            meshes,
+            sets: custom_descriptor_sets,
+        }
     }
     fn write_renderables(buffer: &buffer::Allocated, instancing_batches: &[InstancingBatch]) {
         let ptr = buffer.map().cast::<shader_types::Object>() as *mut shader_types::Object;
@@ -1033,15 +1038,18 @@ impl Renderer {
         );
         self.resize_mesh_buffer_if_necessary(renderables, frame_index);
         self.resize_renderable_buffer_if_necessary(frame_index, renderables.len());
-        let (instancing_batches, meshes, custom_sets) =
-            Self::batch_renderables(&self.materials, renderables);
+        let BatchingResult {
+            batches,
+            meshes,
+            sets: custom_sets,
+        } = Self::batch_renderables(&self.materials, renderables);
         let frame = self.frames.get_mut(frame_index);
         let swapchain_image_index =
             match Self::acquire_swapchain_image(&self.device, &self.swapchain, &frame.immu()) {
                 Some(i) => i,
                 None => return None,
             };
-        Self::write_renderables(frame.renderables_buffer, &instancing_batches);
+        Self::write_renderables(frame.renderables_buffer, &batches);
         Self::write_meshes(frame.mesh_buffer, &meshes);
         *frame.cleanup = Some(Box::new(|| {
             drop(meshes);
@@ -1049,7 +1057,7 @@ impl Renderer {
         }) as Box<dyn FnOnce()>);
         drop(frame);
         let cmd = self.begin_render_pass(frame_index, swapchain_image_index, [0.15, 0.6, 0.9, 1.0]);
-        self.record_draws(frame_index, global_uniform_offset, &instancing_batches, cmd);
+        self.record_draws(frame_index, global_uniform_offset, &batches, cmd);
         self.submit_cmd(frame_index, cmd);
         self.present(frame_index, swapchain_image_index);
         let cpu_work_time = cpu_work_start.elapsed();
