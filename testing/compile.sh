@@ -18,6 +18,6 @@ compile $base/shaders/egui.frag frag
 
 cd ../
 cargo run --bin extract_structs -- \
-    ./basalt/shaders/*.spv \
-    > ./basalt/src/shader_types.rs
+    ./testing/shaders/*.spv \
+    > ./testing/src/shader_types.rs
 

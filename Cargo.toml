@@ -2,7 +2,9 @@
 
 members = [
     "basalt",
-    "reflection"
+    "reflection",
+    "testing",
+    "gui",
 ]
 
 #Set the default for dependencies.

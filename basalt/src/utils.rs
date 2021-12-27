@@ -1,4 +1,4 @@
-use crate::handles::{Device, Instance};
+use crate::handles::{Device, Fence, Instance, Queue, QueueFamily, Semaphore};
 use crate::image;
 use crate::{buffer, shader_types};
 use crate::{
@@ -17,48 +17,64 @@ use std::{
     sync::Arc,
 };
 
-pub fn rasterization_state_create_info<'a>(
-    polygon_mode: vk::PolygonMode,
-) -> vk::PipelineRasterizationStateCreateInfoBuilder<'a> {
-    vk::PipelineRasterizationStateCreateInfoBuilder::new()
-        .depth_clamp_enable(false)
-        .rasterizer_discard_enable(false)
-        .polygon_mode(polygon_mode)
-        .line_width(1.0)
-        .cull_mode(vk::CullModeFlags::BACK)
-        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-        .depth_bias_enable(false)
-        .depth_bias_constant_factor(0.0)
-        .depth_bias_clamp(0.0)
-        .depth_bias_slope_factor(0.0)
+#[derive(Debug, Clone, Copy)]
+pub struct RasterizationState {
+    pub polygon_mode: vk::PolygonMode,
+    pub front_face: vk::FrontFace,
+    pub cull_mode: vk::CullModeFlags,
 }
 
-pub fn input_assembly_create_info<'a>(
-    topology: vk::PrimitiveTopology,
-) -> vk::PipelineInputAssemblyStateCreateInfoBuilder<'a> {
-    vk::PipelineInputAssemblyStateCreateInfoBuilder::new()
-        .topology(topology)
-        .primitive_restart_enable(false)
+impl RasterizationState {
+    pub fn builder(&self) -> vk::PipelineRasterizationStateCreateInfoBuilder<'static> {
+        vk::PipelineRasterizationStateCreateInfoBuilder::new()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(self.polygon_mode)
+            .line_width(1.0)
+            .cull_mode(self.cull_mode)
+            .depth_bias_enable(false)
+            .depth_bias_constant_factor(0.0)
+            .depth_bias_clamp(0.0)
+            .depth_bias_slope_factor(0.0)
+            .front_face(self.front_face)
+    }
+}
+#[derive(Debug, Clone, Copy)]
+pub struct InputAssemblyState {
+    pub topology: vk::PrimitiveTopology,
 }
 
-pub fn depth_stencil_create_info<'a>(
-    depth_test: bool,
-    depth_write: bool,
-    compare_op: vk::CompareOp,
-) -> vk::PipelineDepthStencilStateCreateInfoBuilder<'a> {
-    let compare_op = if depth_test {
-        compare_op
-    } else {
-        vk::CompareOp::ALWAYS
-    };
-    vk::PipelineDepthStencilStateCreateInfoBuilder::new()
-        .depth_test_enable(depth_test)
-        .depth_write_enable(depth_write)
-        .depth_compare_op(compare_op)
-        .depth_bounds_test_enable(false)
-        .min_depth_bounds(0.0)
-        .max_depth_bounds(1.0)
-        .stencil_test_enable(false)
+impl InputAssemblyState {
+    pub fn builder(&self) -> vk::PipelineInputAssemblyStateCreateInfoBuilder<'static> {
+        vk::PipelineInputAssemblyStateCreateInfoBuilder::new()
+            .topology(self.topology)
+            .primitive_restart_enable(false)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DepthStencilInfo {
+    /// The compare function used to determine whether to write to the DepthBuffer.
+    /// None = always write to buffer
+    pub test: Option<vk::CompareOp>,
+    /// disable / enable writing to the DepthBuffer
+    pub write: bool,
+}
+
+impl From<DepthStencilInfo> for vk::PipelineDepthStencilStateCreateInfoBuilder<'static> {
+    fn from(info: DepthStencilInfo) -> Self {
+        let depth_test = info.test.is_some();
+        let depth_write = info.write;
+        let compare_op = info.test.unwrap_or(vk::CompareOp::ALWAYS);
+        vk::PipelineDepthStencilStateCreateInfoBuilder::new()
+            .depth_test_enable(depth_test)
+            .depth_write_enable(depth_write)
+            .depth_compare_op(compare_op)
+            .depth_bounds_test_enable(false)
+            .min_depth_bounds(0.0)
+            .max_depth_bounds(1.0)
+            .stencil_test_enable(false)
+    }
 }
 
 pub const fn pad_uniform_buffer_size(
@@ -73,13 +89,19 @@ pub const fn pad_uniform_buffer_size(
     aligned_size
 }
 
-pub fn multisampling_state_create_info<'a>() -> vk::PipelineMultisampleStateCreateInfoBuilder<'a> {
-    vk::PipelineMultisampleStateCreateInfoBuilder::new()
-        .sample_shading_enable(false)
-        .rasterization_samples(vk::SampleCountFlagBits::_1)
-        .min_sample_shading(1.0)
-        .alpha_to_coverage_enable(false)
-        .alpha_to_one_enable(false)
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MultiSamplingState {}
+
+impl MultiSamplingState {
+    #[must_use]
+    pub fn builder(&self) -> vk::PipelineMultisampleStateCreateInfoBuilder<'static> {
+        vk::PipelineMultisampleStateCreateInfoBuilder::new()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlagBits::_1)
+            .min_sample_shading(1.0)
+            .alpha_to_coverage_enable(false)
+            .alpha_to_one_enable(false)
+    }
 }
 
 pub fn pipeline_shader_stage_create_info(
@@ -216,7 +238,7 @@ pub fn create_uniform_buffer(
 
 pub fn create_descriptor_sets(
     device: &Device,
-    descriptor_set_manager: &mut DescriptorSetManager,
+    descriptor_set_manager: &DescriptorSetManager,
     layout: &DescriptorSetLayout,
     uniform_buffer: &buffer::Allocated,
     object_buffer: &buffer::Allocated,
@@ -294,20 +316,22 @@ pub fn create_depth_image_views(
 }
 pub fn create_device_and_queue(
     instance: Arc<Instance>,
-    graphics_queue_family: u32,
-    transfer_queue_family: u32,
+    graphics_queue_family: QueueFamily,
+    transfer_queue_family: Option<QueueFamily>,
     device_extensions: &[*const i8],
     device_layers: &[*const i8],
     physical_device: vk::PhysicalDevice,
-) -> (Device, vk::Queue, vk::Queue) {
-    let queue_info = vec![
-        vk::DeviceQueueCreateInfoBuilder::new()
-            .queue_family_index(graphics_queue_family)
-            .queue_priorities(&[1.0]),
-        vk::DeviceQueueCreateInfoBuilder::new()
-            .queue_family_index(transfer_queue_family)
-            .queue_priorities(&[0.5]),
-    ];
+) -> (Device, Queue, Option<Queue>) {
+    let mut queue_info = vec![vk::DeviceQueueCreateInfoBuilder::new()
+        .queue_family_index(graphics_queue_family.0)
+        .queue_priorities(&[1.0])];
+    if let Some(transfer_queue_family) = transfer_queue_family {
+        queue_info.push(
+            vk::DeviceQueueCreateInfoBuilder::new()
+                .queue_family_index(transfer_queue_family.0)
+                .queue_priorities(&[0.5]),
+        );
+    }
     let features = vk::PhysicalDeviceFeaturesBuilder::new()
         .fill_mode_non_solid(true)
         .multi_draw_indirect(true);
@@ -333,22 +357,19 @@ pub fn create_device_and_queue(
     let device =
         unsafe { DeviceLoader::new(&instance, physical_device, &device_info, None) }.unwrap();
     let device = Device::new(device, instance);
-    let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
-    let transfer_queue = unsafe { device.get_device_queue(transfer_queue_family, 0) };
+    let graphics_queue = Queue::new(
+        unsafe { device.get_device_queue(graphics_queue_family.0, 0) },
+        label!("GraphicsQueue"),
+    );
+    let transfer_queue = transfer_queue_family.map(|transfer_queue_family| {
+        Queue::new(
+            unsafe { device.get_device_queue(transfer_queue_family.0, 0) },
+            label!("TransferQueue"),
+        )
+    });
     (device, graphics_queue, transfer_queue)
 }
-pub fn create_window() -> (sdl2::Sdl, sdl2::video::Window, sdl2::EventPump) {
-    let sdl = sdl2::init().unwrap();
-    let video = sdl.video().unwrap();
-    let window = video
-        .window("TEST", 500, 500)
-        .vulkan()
-        .resizable()
-        .build()
-        .unwrap();
-    let event_pump = sdl.event_pump().unwrap();
-    (sdl, window, event_pump)
-}
+
 pub fn create_command_buffers(
     device: &DeviceLoader,
     command_pool: &CommandPool,
@@ -519,12 +540,12 @@ pub fn create_physical_device(
     backup_present_mode: vk::PresentModeKHR,
 ) -> (
     vk::PhysicalDevice,
-    u32,
+    QueueFamily,
     vk::SurfaceFormatKHR,
     vk::PresentModeKHR,
     vk::PhysicalDeviceProperties,
     Vec<vk::PresentModeKHR>,
-    u32,
+    Option<QueueFamily>,
 ) {
     let (
         physical_device,
@@ -540,7 +561,7 @@ pub fn create_physical_device(
         .filter_map(|physical_device| unsafe {
             let physical_device_queue_familiy_properties =
                 instance.get_physical_device_queue_family_properties(physical_device, None);
-            let graphics_queue_family = match physical_device_queue_familiy_properties
+            let graphics_family_i = match physical_device_queue_familiy_properties
                 .iter()
                 .copied()
                 .enumerate()
@@ -559,19 +580,22 @@ pub fn create_physical_device(
                 Some(queue_family) => queue_family.try_into().unwrap(),
                 None => return None,
             };
+            let graphics_family = QueueFamily(graphics_family_i);
             let features = instance.get_physical_device_features(physical_device);
             if features.multi_draw_indirect == vk::FALSE {
                 return None;
             }
             //let features = instance.get_physical_device_features2(physical_device, None);
-            let transfer_queue = physical_device_queue_familiy_properties
+            let transfer_family: Option<usize>= physical_device_queue_familiy_properties
                 .into_iter().enumerate()
                 .position(|(i, queue_family_properties)| {
                     queue_family_properties
                         .queue_flags
                         .contains(vk::QueueFlags::TRANSFER) && queue_family_properties
-                        .queue_flags.contains(vk::QueueFlags::COMPUTE) && i != graphics_queue_family as usize
+                        .queue_flags.contains(vk::QueueFlags::COMPUTE) && i != graphics_family_i as usize
                 }).map(|i| i.try_into().unwrap());
+
+            let transfer_family = transfer_family.map(|a| a as u32).map(QueueFamily);
             let formats = instance
                 .get_physical_device_surface_formats_khr(physical_device, surface, None)
                 .unwrap();
@@ -611,12 +635,12 @@ pub fn create_physical_device(
             let device_properties = instance.get_physical_device_properties(physical_device);
             Some((
                 physical_device,
-                graphics_queue_family,
+                graphics_family,
                 format,
                 present_mode,
                 device_properties,
                 present_modes,
-                transfer_queue
+                transfer_family
             ))
         })
         .max_by_key(|(_, _, _, _, properties, _, transfer_queue)| match properties.device_type {
@@ -625,7 +649,6 @@ pub fn create_physical_device(
             _ => 0,
         } + if transfer_queue.is_some() { 1 } else { 0 })
         .expect("No suitable physical device found");
-    let transfer_queue_family = transfer_queue_family.unwrap_or(graphics_queue_family);
     (
         physical_device,
         graphics_queue_family,
@@ -636,21 +659,32 @@ pub fn create_physical_device(
         transfer_queue_family,
     )
 }
-pub fn create_full_view_port(width: u32, height: u32) -> vk::Viewport {
-    vk::Viewport {
-        x: 0.0,
-        y: 0.0,
-        width: width as f32,
-        height: height as f32,
-        min_depth: 0.0,
-        max_depth: 1.0,
+
+#[derive(Debug, Clone, Copy)]
+pub struct ColorBlendAttachment {
+    pub blend_enable: bool,
+    pub src_color_factor: vk::BlendFactor,
+    pub dst_color_factor: vk::BlendFactor,
+}
+
+impl Default for ColorBlendAttachment {
+    fn default() -> Self {
+        Self {
+            blend_enable: false,
+            src_color_factor: vk::BlendFactor::ZERO,
+            dst_color_factor: vk::BlendFactor::ZERO,
+        }
     }
 }
-pub fn create_pipeline_color_blend_attachment_state(
-) -> vk::PipelineColorBlendAttachmentStateBuilder<'static> {
-    vk::PipelineColorBlendAttachmentStateBuilder::new()
-        .color_write_mask(vk::ColorComponentFlags::all())
-        .blend_enable(false)
+
+impl ColorBlendAttachment {
+    pub fn builder(&self) -> vk::PipelineColorBlendAttachmentStateBuilder<'static> {
+        vk::PipelineColorBlendAttachmentStateBuilder::new()
+            .color_write_mask(vk::ColorComponentFlags::all())
+            .blend_enable(self.blend_enable)
+            .src_color_blend_factor(self.src_color_factor)
+            .dst_color_blend_factor(self.dst_color_factor)
+    }
 }
 
 pub fn create_debug_messenger(
@@ -664,7 +698,7 @@ pub fn create_debug_messenger(
         erupt::vk::DebugUtilsMessengerEXT::default()
     }
 }
-pub fn create_debug_messenger_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
+pub fn create_debug_messenger_info() -> vk::DebugUtilsMessengerCreateInfoEXTBuilder<'static> {
     vk::DebugUtilsMessengerCreateInfoEXTBuilder::new()
         .message_severity(
             vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE_EXT
@@ -677,7 +711,6 @@ pub fn create_debug_messenger_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
                 | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE_EXT,
         )
         .pfn_user_callback(Some(debug_callback))
-        .build()
 }
 
 pub fn create_renderables_buffer(allocator: Arc<Allocator>, max_objects: u64) -> buffer::Allocated {
@@ -698,11 +731,13 @@ where
     F: FnOnce(vk::CommandBuffer),
 {
     unsafe {
-        device.reset_fences(&[*transfer_context.fence]).unwrap();
+        let fence = transfer_context.fence.lock().unwrap();
+        let command_pool = transfer_context.command_pool.lock().unwrap();
+        device.reset_fences(&[**fence]).unwrap();
         let alloc_info = vk::CommandBufferAllocateInfoBuilder::new()
             .command_buffer_count(1)
             .level(vk::CommandBufferLevel::PRIMARY)
-            .command_pool(*transfer_context.command_pool);
+            .command_pool(**command_pool);
         let cmd = device.allocate_command_buffers(&alloc_info).unwrap()[0];
         let begin_info = vk::CommandBufferBeginInfoBuilder::new()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -711,25 +746,23 @@ where
         device.end_command_buffer(cmd).unwrap();
         let cmds = &[cmd];
         let submit_info = vk::SubmitInfoBuilder::new().command_buffers(cmds);
+        let queue = transfer_context.transfer_queue.lock().unwrap();
         device
-            .queue_submit(
-                transfer_context.transfer_queue,
-                &[submit_info],
-                Some(*transfer_context.fence),
-            )
+            .queue_submit(**queue, &[submit_info], Some(**fence))
             .unwrap();
+        drop(queue);
         device
-            .wait_for_fences(&[*transfer_context.fence], true, 1_000_000_000)
+            .wait_for_fences(&[**fence], true, 1_000_000_000)
             .unwrap();
-        device
-            .reset_command_pool(*transfer_context.command_pool, None)
-            .unwrap();
+        device.reset_command_pool(**command_pool, None).unwrap();
+        drop(command_pool);
+        drop(fence);
     }
 }
 
 pub fn create_mesh_buffer_set(
     device: &Device,
-    descriptor_set_manager: &mut DescriptorSetManager,
+    descriptor_set_manager: &DescriptorSetManager,
     buffer: &buffer::Allocated,
     set_layout: &DescriptorSetLayout,
 ) -> DescriptorSet {
@@ -769,4 +802,45 @@ where
     T: std::ops::Add<Output = T> + std::ops::Rem<Output = T> + std::ops::Sub<Output = T> + Copy,
 {
     v + (a - (v % a))
+}
+
+pub fn create_sync_objects(
+    device: &Arc<Device>,
+    num: usize,
+) -> (Vec<Fence>, Vec<Semaphore>, Vec<Semaphore>) {
+    let fence_create_info = vk::FenceCreateInfoBuilder::new().flags(vk::FenceCreateFlags::SIGNALED);
+    let render_fences = (0..num)
+        .map(|_| Fence::new(device.clone(), &fence_create_info, label!("RenderFence")))
+        .collect();
+
+    let semaphore_create_info = vk::SemaphoreCreateInfoBuilder::new();
+    let present_semaphores = (0..num)
+        .map(|_| {
+            Semaphore::new(
+                device.clone(),
+                &semaphore_create_info,
+                label!("PresentSemaphore"),
+            )
+        })
+        .collect();
+    let render_semaphores = (0..num)
+        .map(|_| {
+            Semaphore::new(
+                device.clone(),
+                &semaphore_create_info,
+                label!("RenderSemaphore"),
+            )
+        })
+        .collect();
+    (render_fences, present_semaphores, render_semaphores)
+}
+
+pub fn log_resource_created(typename: &'static str, name: &str) {
+    use ::colored::*;
+    ::log::info!("{} {}! {}", "CREATED".green(), typename, name);
+}
+
+pub fn log_resource_dropped(typename: &'static str, name: &str) {
+    use ::colored::*;
+    ::log::info!("{} {}! {}", "DROPPED".red(), typename, name);
 }

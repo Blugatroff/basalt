@@ -1,0 +1,11 @@
+[package]
+name = "gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sdl2 = "*"
+basalt = { path = "../basalt/" }
+egui = "*"
+cgmath = "*"
+

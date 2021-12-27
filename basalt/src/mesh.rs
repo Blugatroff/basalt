@@ -7,23 +7,38 @@ use crate::TransferContext;
 use erupt::vk;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct VertexInfoDescription {
     pub bindings: Vec<vk::VertexInputBindingDescriptionBuilder<'static>>,
     pub attributes: Vec<vk::VertexInputAttributeDescriptionBuilder<'static>>,
-    #[allow(dead_code)]
-    pub flags: vk::PipelineVertexInputStateCreateFlags,
+}
+
+impl VertexInfoDescription {
+    pub fn builder<'a>(&'a self) -> vk::PipelineVertexInputStateCreateInfoBuilder<'a> {
+        vk::PipelineVertexInputStateCreateInfoBuilder::new()
+            .vertex_binding_descriptions(&self.bindings)
+            .vertex_attribute_descriptions(&self.attributes)
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
-pub struct Vertex {
+pub struct DefaultVertex {
     pub position: cgmath::Vector3<f32>,
     pub normal: cgmath::Vector3<f32>,
     pub uv: cgmath::Vector2<f32>,
 }
 
-impl Vertex {
-    pub fn get_vertex_description() -> VertexInfoDescription {
+pub trait Vertex {
+    fn position(&self) -> cgmath::Vector3<f32>;
+    fn description() -> VertexInfoDescription;
+}
+
+impl Vertex for DefaultVertex {
+    fn position(&self) -> cgmath::Vector3<f32> {
+        self.position
+    }
+    fn description() -> VertexInfoDescription {
         let bindings = vec![
             vk::VertexInputBindingDescriptionBuilder::new()
                 .binding(0)
@@ -55,11 +70,9 @@ impl Vertex {
                 .format(vk::Format::R32G32_SFLOAT)
                 .offset(std::mem::size_of::<[f32; 6]>().try_into().unwrap()),
         ];
-        let flags = vk::PipelineVertexInputStateCreateFlags::default();
         VertexInfoDescription {
             bindings,
             attributes,
-            flags,
         }
     }
 }
@@ -82,8 +95,8 @@ pub struct Mesh {
 }
 
 impl Mesh {
-    pub fn new(
-        vertices: &[Vertex],
+    pub fn new<V: Vertex>(
+        vertices: &[V],
         indices: &[u32],
         allocator: Arc<Allocator>,
         transfer_context: &TransferContext,
@@ -102,13 +115,13 @@ impl Mesh {
         )
     }
     #[rustfmt::skip]
-    fn calculate_bounds(vertices: &[Vertex]) -> Bounds {
+    fn calculate_bounds<V: Vertex>(vertices: &[V]) -> Bounds {
         let mut bounds = Bounds {
             max: cgmath::Vector3::new(0.0, 0.0, 0.0),
             min: cgmath::Vector3::new(0.0, 0.0, 0.0),
         };
         for vertex in vertices {
-            let p = &vertex.position;
+            let p = vertex.position();
             if p.x > bounds.max.x { bounds.max.x = p.x }
             if p.y > bounds.max.y { bounds.max.y = p.y }
             if p.z > bounds.max.z { bounds.max.z = p.z }
@@ -301,13 +314,13 @@ impl Mesh {
                     .zip(uvs)
                     .map(|((position, normal), mut uv)| {
                         uv.y = 1.0 - uv.y;
-                        Vertex {
+                        DefaultVertex {
                             position,
                             normal,
                             uv,
                         }
                     })
-                    .collect::<Vec<Vertex>>();
+                    .collect::<Vec<DefaultVertex>>();
                 let indices = model.mesh.indices;
                 Self::new(
                     &vertices,

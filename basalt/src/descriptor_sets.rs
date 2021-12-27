@@ -1,12 +1,12 @@
 use std::{
-    ffi::c_void,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
+    marker::PhantomData,
+    sync::{Arc, Mutex, RwLock},
 };
 
-use crate::handles::{Device, ShaderModule};
+use crate::{
+    handles::{Device, ShaderModule},
+    utils::{log_resource_created, log_resource_dropped},
+};
 use erupt::vk;
 
 #[derive(Debug)]
@@ -79,7 +79,7 @@ impl DescriptorSetLayout {
         for descriptor in &reflection.descriptors {
             let set = descriptor.set;
             let descriptor =
-                DescriptorSetLayoutBinding::from_reflection(descriptor, shader.stage());
+                DescriptorSetLayoutBinding::from_reflection(descriptor, shader.stage().bitmask());
             if let Some(set) = sets.get_mut(set as usize) {
                 set.push(descriptor);
             } else {
@@ -121,34 +121,20 @@ impl DescriptorSetLayout {
 }
 
 #[derive(Debug)]
-pub struct DescriptorPool {
+struct DescriptorPoolInner {
     pool: vk::DescriptorPool,
     device: Arc<Device>,
-    used: AtomicU32,
-    active: AtomicU32,
+    used: u32,
+    active: u32,
     max_sets: u32,
-    pool_sizes: Vec<(vk::DescriptorType, AtomicU32)>,
-    starting_pool_sizes: Vec<(vk::DescriptorType, AtomicU32)>,
+    pool_sizes: Vec<(vk::DescriptorType, u32)>,
+    starting_pool_sizes: Vec<(vk::DescriptorType, u32)>,
+    phantom: PhantomData<*const ()>,
 }
+unsafe impl Send for DescriptorPoolInner {}
 
-impl std::ops::Deref for DescriptorPool {
-    type Target = vk::DescriptorPool;
-    fn deref(&self) -> &Self::Target {
-        &self.pool
-    }
-}
-
-impl Drop for DescriptorPool {
-    fn drop(&mut self) {
-        unsafe { self.device.destroy_descriptor_pool(Some(self.pool), None) }
-    }
-}
-impl DescriptorPool {
-    pub fn new(
-        device: Arc<Device>,
-        max_sets: u32,
-        pool_sizes: Vec<(vk::DescriptorType, u32)>,
-    ) -> Self {
+impl DescriptorPoolInner {
+    fn new(device: Arc<Device>, max_sets: u32, pool_sizes: Vec<(vk::DescriptorType, u32)>) -> Self {
         let mut sizes: Vec<(vk::DescriptorType, u32)> = Vec::new();
         for (ty, count) in pool_sizes {
             if let Some((_, c)) = sizes.iter_mut().find(|(t, _)| *t == ty) {
@@ -170,32 +156,29 @@ impl DescriptorPool {
         let info = vk::DescriptorPoolCreateInfoBuilder::new()
             .pool_sizes(&pool_size_builders)
             .max_sets(max_sets);
-        let pool_sizes: Vec<(vk::DescriptorType, AtomicU32)> = sizes
-            .into_iter()
-            .map(|(ty, count)| (ty, AtomicU32::new(count)))
-            .collect();
-        let starting_pool_sizes = pool_sizes
-            .iter()
-            .map(|(ty, count)| (*ty, AtomicU32::new(count.load(Ordering::SeqCst))))
-            .collect();
-        Self {
+        let pool_sizes: Vec<(vk::DescriptorType, u32)> =
+            sizes.into_iter().map(|(ty, count)| (ty, count)).collect();
+        let starting_pool_sizes = pool_sizes.iter().map(|(ty, count)| (*ty, *count)).collect();
+        log_resource_created("DescriptorPoolInner", "");
+        DescriptorPoolInner {
             pool: unsafe { device.create_descriptor_pool(&info, None) }.unwrap(),
             device,
-            used: AtomicU32::new(0),
-            active: AtomicU32::new(0),
+            used: 0,
+            active: 0,
             starting_pool_sizes,
             pool_sizes,
             max_sets,
+            phantom: Default::default(),
         }
     }
-    pub fn free_set(&self) {
-        let active = self.active.fetch_sub(1, Ordering::SeqCst) - 1;
-        if active == 0 {
+    pub fn free_set(&mut self) {
+        self.active -= 1;
+        if self.active == 0 {
             self.reset();
         }
     }
     pub fn free_slots_remaining(&self) -> u32 {
-        self.max_sets - self.used.load(Ordering::SeqCst)
+        self.max_sets - self.used
     }
     pub fn check_for_space(&self, bindings: &[DescriptorSetLayoutBinding]) -> bool {
         if self.free_slots_remaining() == 0 {
@@ -205,37 +188,80 @@ impl DescriptorPool {
             if self
                 .pool_sizes
                 .iter()
-                .any(|(ty, free)| binding.ty == *ty && free.load(Ordering::SeqCst) >= binding.count)
+                .any(|(ty, free)| binding.ty == *ty && free >= &binding.count)
             {
                 return true;
             }
         }
         false
     }
-    pub fn allocate_set(&self, bindings: &[DescriptorSetLayoutBinding]) {
-        assert!(self.check_for_space(bindings));
-        for binding in bindings {
-            if let Some((_, free)) = self.pool_sizes.iter().find(|(ty, _)| *ty == binding.ty) {
-                free.fetch_sub(binding.count, Ordering::SeqCst);
+    pub fn reset(&mut self) {
+        self.used = 0;
+        self.active = 0;
+        self.pool_sizes = self.starting_pool_sizes.clone();
+        unsafe { self.device.reset_descriptor_pool(self.pool, None) }.unwrap();
+    }
+    pub fn allocate_set(&mut self, layout: &DescriptorSetLayout) -> Option<vk::DescriptorSet> {
+        if !self.check_for_space(&layout.bindings) {
+            return None;
+        }
+        for binding in &layout.bindings {
+            if let Some((_, free)) = self.pool_sizes.iter_mut().find(|(ty, _)| *ty == binding.ty) {
+                *free -= binding.count;
             }
         }
-        self.active.fetch_add(1, Ordering::SeqCst);
-        self.used.fetch_add(1, Ordering::SeqCst);
+        let set_layouts = &[**layout];
+        let alloc_info = vk::DescriptorSetAllocateInfoBuilder::new()
+            .descriptor_pool(self.pool)
+            .set_layouts(set_layouts);
+
+        self.active += 1;
+        self.used += 1;
+        log_resource_created("DescriptorSet", "");
+        Some(unsafe { self.device.allocate_descriptor_sets(&alloc_info) }.unwrap()[0])
     }
-    pub fn reset(&self) {
-        self.used.store(0, Ordering::SeqCst);
-        self.active.store(0, Ordering::SeqCst);
-        for ((_, count), (_, starting_count)) in
-            self.pool_sizes.iter().zip(&self.starting_pool_sizes)
-        {
-            count.store(starting_count.load(Ordering::SeqCst), Ordering::SeqCst);
+}
+
+#[derive(Debug, Clone)]
+pub struct DescriptorPool {
+    inner: Arc<Mutex<DescriptorPoolInner>>,
+}
+impl Drop for DescriptorPoolInner {
+    fn drop(&mut self) {
+        unsafe {
+            log_resource_dropped("DescriptorPoolInner", "");
+            self.device.destroy_descriptor_pool(Some(self.pool), None);
         }
-        unsafe { self.device.reset_descriptor_pool(self.pool, None) }.unwrap();
+    }
+}
+impl DescriptorPool {
+    pub fn new(
+        device: Arc<Device>,
+        max_sets: u32,
+        pool_sizes: Vec<(vk::DescriptorType, u32)>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(DescriptorPoolInner::new(
+                device, max_sets, pool_sizes,
+            ))),
+        }
+    }
+
+    pub fn allocate_set(&self, layout: &DescriptorSetLayout) -> Option<DescriptorSet> {
+        let mut inner = self.inner.lock().unwrap();
+        let set = inner.allocate_set(layout);
+        drop(inner);
+        set.map(|set| DescriptorSet {
+            set,
+            pool: self.inner.clone(),
+            resources: Vec::new(),
+            phantom: PhantomData::default(),
+        })
     }
 }
 
 pub struct DescriptorSetManager {
-    pools: Vec<Arc<DescriptorPool>>,
+    pools: RwLock<Vec<DescriptorPool>>,
     device: Arc<Device>,
 }
 
@@ -243,25 +269,20 @@ impl DescriptorSetManager {
     pub fn new(device: Arc<Device>) -> Self {
         Self {
             device,
-            pools: Vec::new(),
+            pools: RwLock::new(Vec::new()),
         }
     }
     pub fn allocate(
-        &mut self,
+        &self,
         set_layout: &DescriptorSetLayout,
         variable_info: Option<&vk::DescriptorSetVariableDescriptorCountAllocateInfo>,
     ) -> DescriptorSet {
-        for pool in &self.pools {
-            if pool.check_for_space(&set_layout.bindings) {
-                return DescriptorSet::allocate(
-                    &self.device,
-                    set_layout,
-                    pool.clone(),
-                    variable_info,
-                );
+        for pool in self.pools.read().unwrap().iter() {
+            if let Some(set) = DescriptorPool::allocate_set(pool, set_layout) {
+                return set;
             }
         }
-        self.pools.push(Arc::new(DescriptorPool::new(
+        self.pools.write().unwrap().push(DescriptorPool::new(
             self.device.clone(),
             8,
             set_layout
@@ -269,10 +290,18 @@ impl DescriptorSetManager {
                 .iter()
                 .map(|b| (b.ty, b.count * 8))
                 .collect::<Vec<_>>(),
-        )));
+        ));
         self.allocate(set_layout, variable_info)
     }
 }
+
+pub struct DescriptorSet {
+    set: vk::DescriptorSet,
+    pool: Arc<Mutex<DescriptorPoolInner>>,
+    resources: Vec<Box<dyn std::any::Any>>,
+    phantom: PhantomData<*const ()>,
+}
+unsafe impl Send for DescriptorSet {}
 
 impl std::fmt::Debug for DescriptorSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -283,35 +312,7 @@ impl std::fmt::Debug for DescriptorSet {
     }
 }
 
-pub struct DescriptorSet {
-    set: vk::DescriptorSet,
-    pool: Arc<DescriptorPool>,
-    resources: Vec<Box<dyn std::any::Any>>,
-}
-
 impl DescriptorSet {
-    pub fn allocate(
-        device: &Arc<Device>,
-        set_layout: &DescriptorSetLayout,
-        pool: Arc<DescriptorPool>,
-        variable_info: Option<&vk::DescriptorSetVariableDescriptorCountAllocateInfo>,
-    ) -> DescriptorSet {
-        let set_layouts = &[**set_layout];
-        let mut alloc_info = vk::DescriptorSetAllocateInfoBuilder::new()
-            .descriptor_pool(**pool)
-            .set_layouts(set_layouts);
-        if let Some(variable_info) = variable_info {
-            alloc_info.p_next = variable_info as *const _ as *const c_void;
-        }
-        let set = unsafe { device.allocate_descriptor_sets(&alloc_info) }.unwrap()[0];
-        pool.allocate_set(&set_layout.bindings);
-        let resources = Vec::new();
-        DescriptorSet {
-            set,
-            pool,
-            resources,
-        }
-    }
     pub fn attach_resources(&mut self, r: Box<dyn std::any::Any>) {
         self.resources.push(r);
     }
@@ -326,6 +327,7 @@ impl std::ops::Deref for DescriptorSet {
 
 impl Drop for DescriptorSet {
     fn drop(&mut self) {
-        self.pool.free_set();
+        log_resource_dropped("DescriptorSet", "");
+        self.pool.lock().unwrap().free_set();
     }
 }

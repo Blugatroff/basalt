@@ -1,4 +1,5 @@
 use crate::descriptor_sets::DescriptorSetLayout;
+use crate::utils::{log_resource_created, log_resource_dropped};
 use crate::{buffer, descriptor_sets};
 use crate::{
     descriptor_sets::{DescriptorSet, DescriptorSetManager},
@@ -15,6 +16,8 @@ pub struct Allocated {
     allocation: vk_mem_erupt::Allocation,
     allocator: Arc<Allocator>,
     name: String,
+    width: u32,
+    height: u32,
 }
 
 impl std::ops::Deref for Allocated {
@@ -32,12 +35,12 @@ pub struct Loader {
 }
 
 impl Allocated {
-    pub fn image_create_info<'a>(
+    pub fn image_create_info(
         format: vk::Format,
         usage_flags: vk::ImageUsageFlags,
         extent: vk::Extent3D,
         tiling: vk::ImageTiling,
-    ) -> vk::ImageCreateInfoBuilder<'a> {
+    ) -> vk::ImageCreateInfoBuilder<'static> {
         vk::ImageCreateInfoBuilder::new()
             .image_type(vk::ImageType::_2D)
             .format(format)
@@ -48,6 +51,7 @@ impl Allocated {
             .tiling(tiling)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .usage(usage_flags)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
     }
     pub fn image_view_create_info<'a>(
         format: vk::Format,
@@ -81,11 +85,16 @@ impl Allocated {
             ..vk_mem_erupt::AllocationCreateInfo::default()
         };
         let (image, allocation, _) = allocator.create_image(&info, &allocation_info).unwrap();
+        let width = extent.width;
+        let height = extent.height;
+        log_resource_created("AllocatedImage", &format!("{} {}x{}", name, width, height));
         Self {
             image,
             allocation,
             allocator,
             name,
+            width,
+            height,
         }
     }
     pub fn open(image_loader: &Loader, path: &std::path::Path) -> Self {
@@ -103,7 +112,8 @@ impl Allocated {
         assert_eq!(data.len(), image_size as usize);
         let buffer_info = vk::BufferCreateInfoBuilder::new()
             .size(u64::from(image_size))
-            .usage(vk::BufferUsageFlags::TRANSFER_SRC);
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let staging_buffer = buffer::Allocated::new(
             image_loader.allocator.clone(),
@@ -180,7 +190,6 @@ impl Allocated {
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .dst_access_mask(vk::AccessFlags::SHADER_READ);
-
                 image_loader.device.cmd_pipeline_barrier(
                     cmd,
                     Some(vk::PipelineStageFlags::TRANSFER),
@@ -190,6 +199,24 @@ impl Allocated {
                     &[],
                     &[image_barrier_to_read_optimal],
                 );
+
+                let ownership_transfer_barrier = vk::ImageMemoryBarrierBuilder::new()
+                    .image(*image)
+                    .subresource_range(*range)
+                    .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(image_loader.transfer_context.transfer_family.0)
+                    .dst_queue_family_index(image_loader.transfer_context.graphics_family.0);
+
+                image_loader.device.cmd_pipeline_barrier(
+                    cmd,
+                    Some(vk::PipelineStageFlags::COMPUTE_SHADER),
+                    Some(vk::PipelineStageFlags::BOTTOM_OF_PIPE),
+                    None,
+                    &[],
+                    &[],
+                    &[ownership_transfer_barrier],
+                );
             },
         );
         image
@@ -198,7 +225,10 @@ impl Allocated {
 
 impl Drop for Allocated {
     fn drop(&mut self) {
-        log::info!("DROPPED AllocatedImage! {}", self.name);
+        log_resource_dropped(
+            "AllocatedImage",
+            &format!("{} {}x{}", self.name, self.width, self.height),
+        );
         self.allocator.destroy_image(self.image, &self.allocation);
     }
 }
@@ -213,7 +243,7 @@ pub struct Texture {
 impl Texture {
     pub fn new(
         device: &Arc<Device>,
-        descriptor_set_manager: &mut DescriptorSetManager,
+        descriptor_set_manager: &DescriptorSetManager,
         image: Allocated,
         sampler: Arc<Sampler>,
     ) -> Self {

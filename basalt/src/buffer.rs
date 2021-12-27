@@ -1,6 +1,6 @@
 use crate::{
     handles::{Allocator, Device},
-    utils::immediate_submit,
+    utils::{immediate_submit, log_resource_created, log_resource_dropped},
     TransferContext,
 };
 use erupt::vk;
@@ -35,6 +35,7 @@ impl Allocated {
             .unwrap();
         let size = buffer_info.size;
         let usage = buffer_info.usage;
+        log_resource_created("Buffer", &format!("{} {} {:?}", name, size, usage));
         Self {
             buffer,
             allocation,
@@ -92,11 +93,9 @@ impl std::ops::Deref for Allocated {
 
 impl Drop for Allocated {
     fn drop(&mut self) {
-        log::info!(
-            "DROPPED Buffer! {} {} {:?}",
-            self.name,
-            self.size,
-            self.usage
+        log_resource_dropped(
+            "Buffer",
+            &format!("{} {} {:?}", self.name, self.size, self.usage),
         );
         self.allocator.destroy_buffer(self.buffer, &self.allocation);
     }

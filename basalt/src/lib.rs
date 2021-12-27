@@ -1,4 +1,4 @@
-#![deny(clippy::all, clippy::pedantic)]
+#![deny(clippy::all)]
 #![allow(
     clippy::cast_precision_loss,
     clippy::struct_excessive_bools,
@@ -6,6 +6,7 @@
     clippy::ptr_as_ptr,
     clippy::items_after_statements
 )]
+#[macro_export]
 macro_rules! label {
     ( $name:expr ) => {
         concat!(label!(), " -> ", $name)
@@ -14,50 +15,60 @@ macro_rules! label {
         concat!(file!(), ":", line!())
     };
 }
-mod buffer;
+pub use descriptor_sets::DescriptorSetLayout;
+pub use descriptor_sets::DescriptorSetManager;
+pub use erupt::vk;
+pub use handles::Allocator;
+pub use handles::CommandPool;
+pub use handles::Device;
+pub use handles::Pipeline;
+pub use handles::PipelineDesc;
+pub use handles::PipelineLayout;
+use handles::Queue;
+use handles::QueueFamily;
+pub use handles::Sampler;
+pub use handles::ShaderModule;
+pub use mesh::Bounds;
+pub use mesh::DefaultVertex;
+pub use mesh::Mesh;
+pub use mesh::Vertex;
+pub use mesh::VertexInfoDescription;
+pub use shader_types::Object;
+pub use utils::ColorBlendAttachment;
+pub use utils::DepthStencilInfo;
+pub use utils::InputAssemblyState;
+pub use utils::MultiSamplingState;
+pub use utils::RasterizationState;
+pub use vk_mem_erupt;
+pub mod buffer;
+pub mod image;
+
 mod descriptor_sets;
 mod frame;
-mod gui;
 mod handles;
-mod image;
-mod input;
 mod mesh;
 mod shader_types;
 mod utils;
 use crate::descriptor_sets::DescriptorSet;
 use crate::descriptor_sets::DescriptorSetLayoutBinding;
-use cgmath::SquareMatrix;
-use descriptor_sets::{DescriptorSetLayout, DescriptorSetManager};
-use erupt::{cstr, vk};
-use first_person_camera::FirstPersonCamera;
+use crate::handles::DebugUtilsMessenger;
+use crate::utils::create_sync_objects;
+use erupt::cstr;
 use frame::FrameData;
 use frame::Frames;
-use gui::EruptEgui;
-use handles::{
-    Allocator, CommandPool, Device, Fence, Framebuffer, ImageView, Instance, Pipeline,
-    PipelineDesc, PipelineLayout, RenderPass, Sampler, Semaphore, ShaderModule, Surface, Swapchain,
-};
-use input::Input;
-use mesh::{Mesh, Vertex};
-use sdl2::{event::Event, EventPump};
+use handles::{Fence, Framebuffer, ImageView, Instance, RenderPass, Surface, Swapchain};
 use std::sync::Mutex;
 use std::{
-    collections::VecDeque,
     ffi::{c_void, CStr},
     os::raw::c_char,
-    path::PathBuf,
     sync::Arc,
 };
-use structopt::StructOpt;
 use utils::{
-    create_command_buffers, create_debug_messenger, create_debug_messenger_info,
-    create_depth_image_views, create_depth_images, create_descriptor_sets, create_device_and_queue,
-    create_framebuffers, create_full_view_port, create_global_descriptor_set_layout,
-    create_instance, create_mesh_buffer, create_mesh_buffer_set, create_physical_device,
-    create_pipeline_color_blend_attachment_state, create_render_pass, create_renderables_buffer,
-    create_swapchain, create_uniform_buffer, create_window, depth_stencil_create_info,
-    input_assembly_create_info, multisampling_state_create_info, pad_uniform_buffer_size,
-    pipeline_shader_stage_create_info, rasterization_state_create_info,
+    create_command_buffers, create_debug_messenger_info, create_depth_image_views,
+    create_depth_images, create_descriptor_sets, create_device_and_queue, create_framebuffers,
+    create_global_descriptor_set_layout, create_instance, create_mesh_buffer,
+    create_mesh_buffer_set, create_physical_device, create_render_pass, create_renderables_buffer,
+    create_swapchain, create_uniform_buffer, pad_uniform_buffer_size,
 };
 
 const LAYER_KHRONOS_VALIDATION: *const c_char = cstr!("VK_LAYER_KHRONOS_validation");
@@ -83,17 +94,6 @@ unsafe extern "system" fn debug_callback(
     vk::FALSE
 }
 
-#[derive(Copy, Clone, Debug, StructOpt)]
-struct Opt {
-    /// attempt to enable validation layers
-    #[structopt(short, long)]
-    validation_layers: bool,
-    /// how many frames are rendered to at the same time
-    #[structopt(short, long)]
-    frames_in_flight: usize,
-    test: u32,
-}
-
 #[derive(Clone, Debug)]
 pub struct Renderable {
     pub transform: cgmath::Matrix4<f32>,
@@ -104,11 +104,11 @@ pub struct Renderable {
     pub pipeline: usize,
 }
 
-struct PipelineCreationParams<'a> {
-    device: &'a Arc<Device>,
-    width: u32,
-    height: u32,
-    render_pass: &'a RenderPass,
+pub struct PipelineCreationParams<'a> {
+    pub device: &'a Arc<Device>,
+    pub width: u32,
+    pub height: u32,
+    pub render_pass: &'a RenderPass,
 }
 
 #[repr(C)]
@@ -156,18 +156,20 @@ struct IndirectDrawCommand {
     pub padding: [u32; 2],
 }
 
-type MaterialLoadFn = Box<dyn for<'a> Fn(PipelineCreationParams<'a>) -> Pipeline>;
+pub type MaterialLoadFn = Box<dyn for<'a> Fn(PipelineCreationParams<'a>) -> Pipeline>;
 
 pub struct TransferContext {
-    pub transfer_queue: vk::Queue,
-    pub command_pool: CommandPool,
-    pub fence: Fence,
+    pub transfer_queue: Arc<Mutex<Queue>>,
+    pub graphics_family: QueueFamily,
+    pub transfer_family: QueueFamily,
+    pub command_pool: Mutex<CommandPool>,
+    pub fence: Mutex<Fence>,
 }
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct Renderer {
-    #[allow(dead_code)]
-    graphics_queue_family: u32,
+    graphics_family: QueueFamily,
+    transfer_family: QueueFamily,
     start: std::time::Instant,
     supported_present_modes: Vec<vk::PresentModeKHR>,
     present_mode: vk::PresentModeKHR,
@@ -177,9 +179,9 @@ pub struct Renderer {
     width: u32,
     height: u32,
     vsync: bool,
-    graphics_queue: vk::Queue,
-    messenger: Option<vk::DebugUtilsMessengerEXT>,
-    descriptor_set_manager: DescriptorSetManager,
+    graphics_queue: Arc<Mutex<Queue>>,
+    messenger: Option<DebugUtilsMessenger>,
+    descriptor_set_manager: Arc<DescriptorSetManager>,
     command_pool: CommandPool,
     frame_buffers: Vec<Framebuffer>,
     swapchain_images: Vec<vk::Image>,
@@ -206,40 +208,10 @@ pub struct Renderer {
     keep_alive: Vec<Box<dyn std::any::Any + 'static>>,
 }
 
-fn create_sync_objects(
-    device: &Arc<Device>,
-    num: usize,
-) -> (Vec<Fence>, Vec<Semaphore>, Vec<Semaphore>) {
-    let fence_create_info = vk::FenceCreateInfoBuilder::new().flags(vk::FenceCreateFlags::SIGNALED);
-    let render_fences = (0..num)
-        .map(|_| Fence::new(device.clone(), &fence_create_info, label!("RenderFence")))
-        .collect();
-
-    let semaphore_create_info = vk::SemaphoreCreateInfoBuilder::new();
-    let present_semaphores = (0..num)
-        .map(|_| {
-            Semaphore::new(
-                device.clone(),
-                &semaphore_create_info,
-                label!("PresentSemaphore"),
-            )
-        })
-        .collect();
-    let render_semaphores = (0..num)
-        .map(|_| {
-            Semaphore::new(
-                device.clone(),
-                &semaphore_create_info,
-                label!("RenderSemaphore"),
-            )
-        })
-        .collect();
-    (render_fences, present_semaphores, render_semaphores)
-}
-
 impl Renderer {
-    #[allow(clippy::too_many_lines)]
-    fn new(
+    #[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+    #[must_use]
+    pub fn new(
         window: Arc<Mutex<sdl2::video::Window>>,
         vsync: bool,
         frames_in_flight: usize,
@@ -259,11 +231,7 @@ impl Renderer {
 
         let messenger = if validation_layers {
             device_layers.push(LAYER_KHRONOS_VALIDATION);
-            Some(create_debug_messenger(
-                &instance,
-                &messenger_info,
-                validation_layers,
-            ))
+            Some(DebugUtilsMessenger::new(instance.clone(), &messenger_info))
         } else {
             None
         };
@@ -273,12 +241,12 @@ impl Renderer {
 
         let (
             physical_device,
-            graphics_queue_family,
+            graphics_family,
             format,
             present_mode,
             physical_device_properties,
             supported_present_modes,
-            transfer_queue_family,
+            transfer_family,
         ) = create_physical_device(
             &instance,
             *surface,
@@ -286,15 +254,14 @@ impl Renderer {
             present_mode,
             vk::PresentModeKHR::FIFO_KHR,
         );
-
+        //let transfer_family = None;
         log::info!("Using physical device: {:?}", unsafe {
             CStr::from_ptr(physical_device_properties.device_name.as_ptr())
         });
-
         let (device, graphics_queue, transfer_queue) = create_device_and_queue(
             Arc::clone(&instance),
-            graphics_queue_family,
-            transfer_queue_family,
+            graphics_family,
+            transfer_family,
             &device_extensions,
             &device_layers,
             physical_device,
@@ -311,7 +278,7 @@ impl Renderer {
         );
 
         let command_pool_info = vk::CommandPoolCreateInfoBuilder::new()
-            .queue_family_index(graphics_queue_family)
+            .queue_family_index(graphics_family.0)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = CommandPool::new(device.clone(), &command_pool_info, label!());
         let command_buffers =
@@ -376,12 +343,12 @@ impl Renderer {
             .address_mode_v(address_mode)
             .address_mode_w(address_mode);
         let sampler = Sampler::new(device.clone(), &sampler, label!());
-        let mut descriptor_set_manager = DescriptorSetManager::new(device.clone());
+        let descriptor_set_manager = Arc::new(DescriptorSetManager::new(device.clone()));
         let descriptor_sets = (0..frames_in_flight)
             .map(|i| {
                 create_descriptor_sets(
                     &device,
-                    &mut descriptor_set_manager,
+                    &descriptor_set_manager,
                     &global_set_layout,
                     &uniform_buffer,
                     &renderables_buffers[i],
@@ -406,12 +373,7 @@ impl Renderer {
         let mesh_sets = mesh_buffers
             .iter()
             .map(|buffer| {
-                create_mesh_buffer_set(
-                    &device,
-                    &mut descriptor_set_manager,
-                    buffer,
-                    &mesh_set_layout,
-                )
+                create_mesh_buffer_set(&device, &descriptor_set_manager, buffer, &mesh_set_layout)
             })
             .collect::<Vec<_>>();
         let cleanup = (0..frames_in_flight).map(|_| None).collect();
@@ -447,21 +409,33 @@ impl Renderer {
             })
             .collect();
         let fence_info = vk::FenceCreateInfoBuilder::new().flags(vk::FenceCreateFlags::empty());
-        let fence = Fence::new(device.clone(), &fence_info, label!("TransferContextFence"));
+        let fence = Mutex::new(Fence::new(
+            device.clone(),
+            &fence_info,
+            label!("TransferContextFence"),
+        ));
+
+        let graphics_queue = Arc::new(Mutex::new(graphics_queue));
+        let transfer_family = transfer_family.unwrap_or(graphics_family);
+        let transfer_queue = transfer_queue
+            .map(|q| Arc::new(Mutex::new(q)))
+            .unwrap_or_else(|| graphics_queue.clone());
         let command_pool_info = vk::CommandPoolCreateInfoBuilder::new()
-            .queue_family_index(transfer_queue_family)
+            .queue_family_index(transfer_family.0)
             .flags(
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER
                     | vk::CommandPoolCreateFlags::TRANSIENT,
             );
-        let transfer_command_pool = CommandPool::new(
+        let transfer_command_pool = Mutex::new(CommandPool::new(
             device.clone(),
             &command_pool_info,
             label!("TransferContextCommandPool"),
-        );
+        ));
         let transfer_context = Arc::new(TransferContext {
             transfer_queue,
             command_pool: transfer_command_pool,
+            graphics_family,
+            transfer_family,
             fence,
         });
         let image_loader = image::Loader {
@@ -473,7 +447,8 @@ impl Renderer {
         drop(w);
         let keep_alive = Vec::from([Box::new(window) as Box<dyn std::any::Any + 'static>]);
         Self {
-            graphics_queue_family,
+            graphics_family,
+            transfer_family,
             start,
             supported_present_modes,
             present_mode,
@@ -510,10 +485,32 @@ impl Renderer {
             keep_alive,
         }
     }
-    fn device(&self) -> &Arc<Device> {
+    #[must_use]
+    pub fn allocator(&self) -> &Arc<Allocator> {
+        &self.allocator
+    }
+    #[must_use]
+    pub fn image_loader(&self) -> &image::Loader {
+        &self.image_loader
+    }
+    #[must_use]
+    pub fn device(&self) -> &Arc<Device> {
         &self.device
     }
-    fn pipeline_creation_params(&self) -> PipelineCreationParams {
+    #[must_use]
+    pub fn transfer_context(&self) -> &Arc<TransferContext> {
+        &self.transfer_context
+    }
+    #[must_use]
+    pub fn default_sampler(&self) -> &Arc<Sampler> {
+        &self.sampler
+    }
+    #[must_use]
+    pub fn descriptor_set_manager(&self) -> &Arc<DescriptorSetManager> {
+        &self.descriptor_set_manager
+    }
+    #[must_use]
+    pub fn pipeline_creation_params(&self) -> PipelineCreationParams {
         PipelineCreationParams {
             device: &self.device,
             width: self.width,
@@ -521,7 +518,7 @@ impl Renderer {
             render_pass: &self.render_pass,
         }
     }
-    fn register_pipeline(&mut self, create_fn: MaterialLoadFn) -> usize {
+    pub fn register_pipeline(&mut self, create_fn: MaterialLoadFn) -> usize {
         let material = create_fn(self.pipeline_creation_params());
         self.materials.push((material, create_fn));
         self.materials.len() - 1
@@ -542,9 +539,13 @@ impl Renderer {
     }
     fn wait_idle(&self) {
         unsafe {
+            let guard = self.graphics_queue.lock().unwrap();
+            let guard_2 = self.transfer_context.transfer_queue.lock().unwrap();
             self.device.device_wait_idle().unwrap();
             self.device
                 .free_command_buffers(*self.command_pool, &self.frames.command_buffers);
+            drop(guard_2);
+            drop(guard);
         }
     }
     fn change_num_frames_in_flight(&mut self) {
@@ -580,7 +581,7 @@ impl Renderer {
             .map(|object_buffer| {
                 create_descriptor_sets(
                     &self.device,
-                    &mut self.descriptor_set_manager,
+                    &self.descriptor_set_manager,
                     &self.global_set_layout,
                     &self.uniform_buffer,
                     object_buffer,
@@ -601,7 +602,7 @@ impl Renderer {
             .map(|buffer| {
                 create_mesh_buffer_set(
                     &self.device,
-                    &mut self.descriptor_set_manager,
+                    &self.descriptor_set_manager,
                     buffer,
                     &self.mesh_set_layout,
                 )
@@ -646,7 +647,13 @@ impl Renderer {
         );
     }
     /// returns whether a resize was necessary
-    fn resize(&mut self, width: u32, height: u32, frames_in_flight: usize, vsync: bool) -> bool {
+    pub fn resize(
+        &mut self,
+        width: u32,
+        height: u32,
+        frames_in_flight: usize,
+        vsync: bool,
+    ) -> bool {
         let num_frames_in_flight_changed = frames_in_flight != self.frames_in_flight;
         if width == self.width
             && height == self.height
@@ -823,7 +830,7 @@ impl Renderer {
                 create_renderables_buffer(Arc::clone(&self.allocator), new_length);
             *frame.descriptor_set = create_descriptor_sets(
                 &self.device,
-                &mut self.descriptor_set_manager,
+                &self.descriptor_set_manager,
                 &self.global_set_layout,
                 &self.uniform_buffer,
                 &*frame.renderables_buffer,
@@ -868,7 +875,7 @@ impl Renderer {
                 create_mesh_buffer(self.allocator.clone(), mesh_buffer_min_size as u64 / 2 * 3);
             *frame.mesh_set = create_mesh_buffer_set(
                 &self.device,
-                &mut self.descriptor_set_manager,
+                &self.descriptor_set_manager,
                 frame.mesh_buffer,
                 &self.mesh_set_layout,
             );
@@ -990,10 +997,10 @@ impl Renderer {
             .wait_semaphores(wait_semaphores)
             .signal_semaphores(signal_semaphores)
             .command_buffers(command_buffers);
-
+        let queue = self.graphics_queue.lock().unwrap();
         unsafe {
             self.device
-                .queue_submit(self.graphics_queue, &[submit], Some(**frame.render_fence))
+                .queue_submit(**queue, &[submit], Some(**frame.render_fence))
                 .unwrap();
         }
     }
@@ -1006,15 +1013,14 @@ impl Renderer {
             .swapchains(swapchains)
             .wait_semaphores(wait_semaphores)
             .image_indices(image_indices);
-        let res = unsafe {
-            self.device
-                .queue_present_khr(self.graphics_queue, &present_info)
-        };
+        let queue = self.graphics_queue.lock().unwrap();
+        let res = unsafe { self.device.queue_present_khr(**queue, &present_info) };
         if res.is_err() {
             log::warn!("{:#?}", res);
         }
     }
-    fn render(
+    #[allow(clippy::missing_panics_doc)]
+    pub fn render(
         &mut self,
         renderables: &[Renderable],
         view_proj: cgmath::Matrix4<f32>,
@@ -1068,6 +1074,9 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
+            log::info!(label!("Waiting for exclusive access to queues"));
+            let guard_0 = self.graphics_queue.lock().unwrap();
+            let guard_1 = self.transfer_context.transfer_queue.lock().unwrap();
             log::info!(label!("Waiting for Fences"));
             self.device
                 .wait_for_fences(
@@ -1083,471 +1092,8 @@ impl Drop for Renderer {
                 .unwrap();
             log::info!(label!("Waiting for Idle"));
             self.device.device_wait_idle().unwrap();
-            if self.messenger.is_some() {
-                self.instance
-                    .destroy_debug_utils_messenger_ext(self.messenger, None);
-            }
             log::info!(label!("DROPPING App"));
+            drop((guard_0, guard_1));
         };
     }
-}
-
-struct State {
-    frames_in_flight: usize,
-    vsync: bool,
-    last_time: std::time::Instant,
-    start: std::time::Instant,
-    egui: EruptEgui,
-    renderables: Vec<Renderable>,
-    mouse_captured: bool,
-    input: Input,
-    camera: FirstPersonCamera,
-    last_frame_times: std::collections::VecDeque<(f32, f32, f32, f32)>,
-    workvec: Vec<Renderable>,
-    window: Arc<Mutex<sdl2::video::Window>>,
-    event_pump: EventPump,
-    sdl: sdl2::Sdl,
-    renderer: Renderer,
-    egui_enabled: bool,
-}
-
-impl State {
-    #[allow(clippy::too_many_lines)]
-    pub fn new() -> Self {
-        let (sdl, window, event_pump) = create_window();
-        let window = Arc::new(Mutex::new(window));
-        sdl.mouse().set_relative_mouse_mode(true);
-        let opt = Opt::from_args();
-        let mut renderer = Renderer::new(
-            Arc::clone(&window),
-            true,
-            opt.frames_in_flight,
-            opt.validation_layers,
-        );
-        {
-            let mut window = window.try_lock().unwrap();
-            window.set_grab(true);
-        }
-        let vertices = vec![
-            Vertex {
-                position: cgmath::Vector3::new(1.0, 1.0, 0.0),
-                normal: cgmath::Vector3::new(0.0, 0.0, 0.0),
-                uv: cgmath::Vector2::new(1.0, 1.0),
-            },
-            Vertex {
-                position: cgmath::Vector3::new(-1.0, 1.0, 0.0),
-                normal: cgmath::Vector3::new(0.0, 0.0, 0.0),
-                uv: cgmath::Vector2::new(0.0, 1.0),
-            },
-            Vertex {
-                position: cgmath::Vector3::new(0.0, -1.0, 0.0),
-                normal: cgmath::Vector3::new(0.0, 0.0, 0.0),
-                uv: cgmath::Vector2::new(0.5, 0.0),
-            },
-        ];
-        let rgb_pipeline = renderer.register_pipeline(rgb_pipeline(renderer.device()));
-        let mesh_pipeline = renderer.register_pipeline(mesh_pipeline(renderer.device()));
-        let mut triangle_mesh = Mesh::new(
-            &vertices,
-            &[0, 1, 2, 2, 1, 0],
-            renderer.allocator.clone(),
-            &renderer.transfer_context,
-            &renderer.device,
-            true,
-        );
-        let mut suzanne_mesh = Mesh::load(
-            renderer.allocator.clone(),
-            "./assets/suzanne.obj",
-            &renderer.transfer_context,
-            &renderer.device,
-        )
-        .unwrap()
-        .swap_remove(0);
-        Mesh::combine_meshes(
-            [&mut suzanne_mesh, &mut triangle_mesh],
-            renderer.allocator.clone(),
-            &renderer.transfer_context,
-            &renderer.device,
-        );
-        let image = image::Allocated::open(
-            &renderer.image_loader,
-            &PathBuf::from("./assets/lost_empire-RGBA.png"),
-        );
-        let mut renderables = Vec::new();
-        let texture = Arc::new(image::Texture::new(
-            &renderer.device().clone(),
-            &mut renderer.descriptor_set_manager,
-            image,
-            renderer.sampler.clone(),
-        ));
-        let mut suzanne = Renderable {
-            mesh: Arc::new(suzanne_mesh),
-            pipeline: rgb_pipeline,
-            transform: cgmath::Matrix4::identity(),
-            custom_set: None,
-            custom_id: 0,
-            uncullable: false,
-        };
-
-        let s = opt.test;
-        for x in 0..s {
-            for y in 0..s {
-                for z in 0..s {
-                    suzanne.transform = cgmath::Matrix4::from_translation(cgmath::Vector3::new(
-                        x as f32, y as f32, z as f32,
-                    ));
-                    renderables.push(suzanne.clone());
-                }
-            }
-        }
-
-        let empire_meshes = Mesh::load(
-            renderer.allocator.clone(),
-            "./assets/lost_empire.obj",
-            &renderer.transfer_context,
-            &renderer.device,
-        )
-        .unwrap();
-        let empire = empire_meshes.into_iter().map(|mesh| Renderable {
-            mesh: Arc::new(mesh),
-            pipeline: mesh_pipeline,
-            transform: cgmath::Matrix4::identity(),
-            custom_set: Some(texture.set.clone()),
-            custom_id: 0,
-            uncullable: false,
-        });
-
-        let mut triangle = Renderable {
-            mesh: Arc::new(triangle_mesh),
-            pipeline: mesh_pipeline,
-            transform: cgmath::Matrix4::from_scale(1.0),
-            custom_set: Some(texture.set.clone()),
-            custom_id: 0,
-            uncullable: false,
-        };
-        triangle.transform =
-            cgmath::Matrix4::from_translation(cgmath::Vector3::new(-3.0, 0.0, 0.0))
-                * cgmath::Matrix4::from_scale(2.0);
-        renderables.push(triangle.clone());
-        triangle.transform =
-            cgmath::Matrix4::from_translation(cgmath::Vector3::new(-8.0, 0.0, 0.0))
-                * cgmath::Matrix4::from_scale(4.0);
-        renderables.push(triangle);
-
-        for mut empire in empire {
-            empire.transform =
-                cgmath::Matrix4::from_translation(cgmath::Vector3::new(0.0, 0.0, 0.0));
-            renderables.push(empire);
-        }
-        let last_time = std::time::Instant::now();
-        let input = Input::default();
-        let camera = FirstPersonCamera::new(
-            cgmath::Vector3::new(0.0, 0.0, -2.0),
-            cgmath::Vector3::new(0.0, 0.0, 1.0),
-        );
-
-        let last_frame_times = VecDeque::new();
-        let egui = EruptEgui::new(&mut renderer, opt.frames_in_flight);
-        let frames_in_flight = opt.frames_in_flight;
-        let workvec = Vec::new();
-        let vsync = true;
-        let egui_enabled = false;
-        let start = std::time::Instant::now();
-        Self {
-            start,
-            vsync,
-            frames_in_flight,
-            egui,
-            workvec,
-            last_frame_times,
-            renderables,
-            renderer,
-            last_time,
-            mouse_captured: true,
-            input,
-            camera,
-            sdl,
-            window,
-            event_pump,
-            egui_enabled,
-        }
-    }
-    fn ui(&mut self) {
-        let (width, height) = self.window.lock().unwrap().size();
-        self.egui.run(
-            &self.renderer.allocator,
-            &self.renderer.image_loader,
-            &mut self.renderer.descriptor_set_manager,
-            (width as f32, height as f32),
-            |ctx| {
-                ctx.request_repaint();
-                egui::Window::new("Debug Window").show(ctx, |ui| {
-                    let dt = self
-                        .last_frame_times
-                        .get(self.last_frame_times.len().max(1) - 1)
-                        .map_or(0.0, |t| t.1);
-                    ui.label(format!("{}ms", dt * 1000.0));
-                    ui.label(format!("{}fps", 1.0 / dt));
-                    ui.checkbox(&mut self.vsync, "Vsync");
-                    ui.add(egui::Slider::new(&mut self.frames_in_flight, 1..=15));
-                    ui.add({
-                        egui::plot::Plot::new(0)
-                            .line(
-                                egui::plot::Line::new(egui::plot::Values::from_values_iter(
-                                    self.last_frame_times.iter().map(|(t, v, _, _)| {
-                                        egui::plot::Value::new(*t, *v * 1000.0)
-                                    }),
-                                ))
-                                .color(egui::Color32::BLUE)
-                                .name("Frametime"),
-                            )
-                            .line(
-                                egui::plot::Line::new(egui::plot::Values::from_values_iter(
-                                    self.last_frame_times.iter().map(|(t, _, v, _)| {
-                                        egui::plot::Value::new(*t, *v * 1000.0)
-                                    }),
-                                ))
-                                .color(egui::Color32::RED)
-                                .name("GPU-Wait"),
-                            )
-                            .line(
-                                egui::plot::Line::new(egui::plot::Values::from_values_iter(
-                                    self.last_frame_times.iter().map(|(t, _, _, v)| {
-                                        egui::plot::Value::new(*t, *v * 1000.0)
-                                    }),
-                                ))
-                                .color(egui::Color32::GREEN)
-                                .name("Prerender Processing"),
-                            )
-                            .legend(egui::plot::Legend::default())
-                            .allow_drag(false)
-                            .allow_zoom(false)
-                    })
-                });
-            },
-        );
-    }
-
-    fn resize(&mut self) -> bool {
-        let (width, height) = self.window.lock().unwrap().size();
-        if self.frames_in_flight != self.egui.frames_in_flight() {
-            self.egui.adjust_frames_in_flight(self.frames_in_flight);
-            assert_eq!(self.frames_in_flight, self.egui.frames_in_flight());
-        }
-        self.renderer
-            .resize(width, height, self.frames_in_flight, self.vsync)
-    }
-    fn update(&mut self) -> bool {
-        let now = std::time::Instant::now();
-        let dt = now - self.last_time;
-        let dt = dt.as_secs_f32();
-        let time = self.start.elapsed().as_secs_f32();
-        while self.last_frame_times.len() > 1000 {
-            self.last_frame_times.pop_front();
-        }
-        self.resize();
-        let mut window = self.window.lock().unwrap();
-        self.camera.update(&self.input.make_controls(dt));
-        let (width, height) = window.size();
-        let aspect = width as f32 / height as f32;
-        let view_proj = self.camera.create_view_projection_matrix(
-            aspect,
-            90.0 * std::f32::consts::PI / 180.0,
-            0.1,
-            200.0,
-        );
-        for event in self.event_pump.poll_iter().collect::<Vec<_>>() {
-            if self.mouse_captured {
-                self.input.process_event(&event);
-            }
-            self.egui.process_event(&event);
-            match event {
-                Event::Quit { .. } => return false,
-                Event::KeyDown {
-                    keycode: Some(keycode),
-                    ..
-                } => match keycode {
-                    sdl2::keyboard::Keycode::Z => {
-                        log::info!(
-                            "Device reference count: {}",
-                            Arc::strong_count(&self.renderer.device)
-                        );
-                    }
-                    sdl2::keyboard::Keycode::V => {
-                        self.vsync = true;
-                    }
-                    sdl2::keyboard::Keycode::E => {
-                        self.mouse_captured = !self.mouse_captured;
-                        self.sdl.mouse().capture(self.mouse_captured);
-                        window.set_grab(self.mouse_captured);
-                        self.sdl
-                            .mouse()
-                            .set_relative_mouse_mode(self.mouse_captured);
-                    }
-                    sdl2::keyboard::Keycode::C => {
-                        self.egui_enabled = !self.egui_enabled;
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-        }
-        drop(window);
-        self.ui();
-        self.resize();
-        self.workvec.clear();
-        self.workvec.extend(self.renderables.iter().cloned());
-        self.workvec.extend(self.egui.renderables().iter().cloned());
-        if let Some((gpu_wait, cpu_work_time)) = self.renderer.render(&self.workvec, view_proj) {
-            self.last_frame_times.push_back((
-                time,
-                dt,
-                gpu_wait.as_secs_f32(),
-                cpu_work_time.as_secs_f32(),
-            ));
-        }
-
-        self.last_time = now;
-        true
-    }
-}
-
-fn main() {
-    pretty_env_logger::init();
-    let mut state = State::new();
-    loop {
-        if !state.update() {
-            break;
-        }
-    }
-}
-
-fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
-    let vert_shader = ShaderModule::load(device.clone(), "./shaders/mesh.vert.spv").unwrap();
-    let frag_shader = ShaderModule::load(device.clone(), "./shaders/mesh.frag.spv").unwrap();
-    let set_layouts: Vec<DescriptorSetLayout> = [
-        DescriptorSetLayout::from_shader(device, &vert_shader),
-        DescriptorSetLayout::from_shader(device, &frag_shader),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-
-    Box::new(move |args| {
-        let set_layouts = set_layouts
-            .iter()
-            .map(|l| **l)
-            .collect::<Vec<vk::DescriptorSetLayout>>();
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
-            .set_layouts(&set_layouts)
-            .push_constant_ranges(&[]);
-        let pipeline_layout = Arc::new(PipelineLayout::new(
-            args.device.clone(),
-            &pipeline_layout_info,
-            label!("MeshPipelineLayout"),
-        ));
-        let width = args.width;
-        let height = args.height;
-        let vertex_description = Vertex::get_vertex_description();
-        let vertex_input_info = vk::PipelineVertexInputStateCreateInfoBuilder::new()
-            .vertex_attribute_descriptions(&vertex_description.attributes)
-            .vertex_binding_descriptions(&vertex_description.bindings);
-        let vertex_input_info = &vertex_input_info;
-        let shader_stages = [
-            pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::VERTEX, &vert_shader),
-            pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::FRAGMENT, &frag_shader),
-        ];
-        let color_blend_attachment = create_pipeline_color_blend_attachment_state();
-        /* let color_blend_attachment = color_blend_attachment
-        .blend_enable(true)
-        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-        .color_blend_op(vk::BlendOp::ADD)
-        .src_alpha_blend_factor(vk::BlendFactor::SRC_ALPHA)
-        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-        .alpha_blend_op(vk::BlendOp::SUBTRACT); */
-        let view_port = create_full_view_port(args.width, args.height);
-        Pipeline::new(
-            args.device.clone(),
-            **args.render_pass,
-            &PipelineDesc {
-                view_port,
-                scissor: vk::Rect2DBuilder::new()
-                    .offset(vk::Offset2D { x: 0, y: 0 })
-                    .extent(vk::Extent2D { width, height }),
-                color_blend_attachment,
-                shader_stages: &shader_stages,
-                vertex_input_info,
-                input_assembly_state: &input_assembly_create_info(
-                    vk::PrimitiveTopology::TRIANGLE_LIST,
-                ),
-                rasterization_state: &rasterization_state_create_info(vk::PolygonMode::FILL),
-                multisample_state: &multisampling_state_create_info(),
-                layout: pipeline_layout,
-                depth_stencil: &depth_stencil_create_info(true, true, vk::CompareOp::LESS),
-            },
-            String::from(label!("MeshPipeline")),
-        )
-    })
-}
-
-fn rgb_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
-    let frag_shader =
-        ShaderModule::load(device.clone(), "./shaders/rgb_triangle.frag.spv").unwrap();
-    let vert_shader =
-        ShaderModule::load(device.clone(), "./shaders/rgb_triangle.vert.spv").unwrap();
-    let set_layouts: Vec<DescriptorSetLayout> = [
-        DescriptorSetLayout::from_shader(device, &vert_shader),
-        DescriptorSetLayout::from_shader(device, &frag_shader),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-
-    let vertex_description = Vertex::get_vertex_description();
-    Box::new(move |args| {
-        let width = args.width;
-        let height = args.height;
-        let shader_stages = [
-            pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::VERTEX, &vert_shader),
-            pipeline_shader_stage_create_info(vk::ShaderStageFlagBits::FRAGMENT, &frag_shader),
-        ];
-        let set_layouts = set_layouts
-            .iter()
-            .map(|l| **l)
-            .collect::<Vec<vk::DescriptorSetLayout>>();
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
-            .set_layouts(&set_layouts)
-            .push_constant_ranges(&[]);
-        let pipeline_layout = Arc::new(PipelineLayout::new(
-            args.device.clone(),
-            &pipeline_layout_info,
-            label!("RgbPipelineLayout"),
-        ));
-        let view_port = create_full_view_port(width, height);
-        let color_blend_attachment = create_pipeline_color_blend_attachment_state();
-        Pipeline::new(
-            args.device.clone(),
-            **args.render_pass,
-            &PipelineDesc {
-                view_port,
-                scissor: vk::Rect2DBuilder::new()
-                    .offset(vk::Offset2D { x: 0, y: 0 })
-                    .extent(vk::Extent2D { width, height }),
-                color_blend_attachment,
-                shader_stages: &shader_stages,
-                vertex_input_info: &vk::PipelineVertexInputStateCreateInfoBuilder::new()
-                    .vertex_attribute_descriptions(&vertex_description.attributes)
-                    .vertex_binding_descriptions(&vertex_description.bindings),
-                input_assembly_state: &input_assembly_create_info(
-                    vk::PrimitiveTopology::TRIANGLE_LIST,
-                ),
-                rasterization_state: &rasterization_state_create_info(vk::PolygonMode::FILL),
-                multisample_state: &multisampling_state_create_info(),
-                layout: Arc::clone(&pipeline_layout),
-                depth_stencil: &depth_stencil_create_info(true, true, vk::CompareOp::LESS),
-            },
-            String::from(label!("RgbPipeline")),
-        )
-    })
 }
