@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     buffer,
     descriptor_sets::DescriptorSet,
@@ -16,9 +18,10 @@ pub struct Frames {
     pub descriptor_sets: Vec<DescriptorSet>,
     pub renderables_buffers: Vec<buffer::Allocated>,
     pub max_objects: Vec<usize>,
-    pub mesh_buffers: Vec<buffer::Allocated>,
-    pub mesh_sets: Vec<DescriptorSet>,
+    pub mesh_buffers: Vec<Arc<buffer::Allocated>>,
+    pub cull_sets: Vec<DescriptorSet>,
     pub cleanup: Vec<Option<Box<dyn FnOnce()>>>,
+    pub indirect_buffers: Vec<Arc<buffer::Allocated>>,
 }
 
 #[allow(clippy::module_name_repetitions)]
@@ -33,8 +36,9 @@ pub struct FrameData<'a> {
     pub renderables_buffer: &'a buffer::Allocated,
     pub max_objects: &'a usize,
     pub mesh_buffer: &'a buffer::Allocated,
-    pub mesh_set: &'a DescriptorSet,
+    pub cull_set: &'a DescriptorSet,
     pub cleanup: &'a Option<Box<dyn FnOnce()>>,
+    pub indirect_buffer: &'a Arc<buffer::Allocated>,
 }
 
 impl<'a> FrameDataMut<'a> {
@@ -50,8 +54,9 @@ impl<'a> FrameDataMut<'a> {
             renderables_buffer: self.renderables_buffer,
             max_objects: self.max_objects,
             mesh_buffer: self.mesh_buffer,
-            mesh_set: self.mesh_set,
+            cull_set: self.cull_set,
             cleanup: self.cleanup,
+            indirect_buffer: self.indirect_buffer,
         }
     }
 }
@@ -67,9 +72,10 @@ pub struct FrameDataMut<'a> {
     pub descriptor_set: &'a mut DescriptorSet,
     pub renderables_buffer: &'a mut buffer::Allocated,
     pub max_objects: &'a mut usize,
-    pub mesh_buffer: &'a mut buffer::Allocated,
-    pub mesh_set: &'a mut DescriptorSet,
+    pub mesh_buffer: &'a mut Arc<buffer::Allocated>,
+    pub cull_set: &'a mut DescriptorSet,
     pub cleanup: &'a mut Option<Box<dyn FnOnce()>>,
+    pub indirect_buffer: &'a mut Arc<buffer::Allocated>,
 }
 
 impl Frames {
@@ -85,8 +91,9 @@ impl Frames {
             renderables_buffer: &self.renderables_buffers[index],
             max_objects: &self.max_objects[index],
             mesh_buffer: &self.mesh_buffers[index],
-            mesh_set: &self.mesh_sets[index],
+            cull_set: &self.cull_sets[index],
             cleanup: &self.cleanup[index],
+            indirect_buffer: &self.indirect_buffers[index],
         }
     }
     pub fn get_mut(&mut self, index: usize) -> FrameDataMut {
@@ -101,8 +108,9 @@ impl Frames {
             renderables_buffer: &mut self.renderables_buffers[index],
             max_objects: &mut self.max_objects[index],
             mesh_buffer: &mut self.mesh_buffers[index],
-            mesh_set: &mut self.mesh_sets[index],
+            cull_set: &mut self.cull_sets[index],
             cleanup: &mut self.cleanup[index],
+            indirect_buffer: &mut self.indirect_buffers[index],
         }
     }
 }

@@ -54,7 +54,7 @@ impl State {
         let (sdl, window, event_pump) = create_window();
         let window = Arc::new(Mutex::new(window));
         sdl.mouse().set_relative_mouse_mode(true);
-        let validation_layers = true;
+        let validation_layers = std::env::args().any(|s| s == "v");
         let frames_in_flight = 3;
         let mut renderer = Renderer::new(
             Arc::clone(&window),
@@ -84,8 +84,7 @@ impl State {
             },
         ];
         let threads = std::env::args()
-            .skip(1)
-            .next()
+            .nth(1)
             .unwrap_or_else(String::new)
             .parse::<u32>()
             .unwrap_or(0);
@@ -137,6 +136,7 @@ impl State {
                                     image,
                                     sampler.clone(),
                                 );
+                                drop(mesh);
                             }
                         });
                         tx
@@ -180,7 +180,7 @@ impl State {
         let sampler = renderer.default_sampler().clone();
         let texture = Arc::new(image::Texture::new(
             &renderer.device().clone(),
-            &renderer.descriptor_set_manager(),
+            renderer.descriptor_set_manager(),
             image,
             sampler,
         ));
@@ -431,29 +431,23 @@ fn main() {
 fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
     let vert_shader = ShaderModule::new(
         device.clone(),
-        include_bytes!("../shaders/mesh.vert.spv"),
+        include_bytes!("../../shaders/mesh.vert.spv"),
         String::from("MeshPipelineVertexShader"),
         vk::ShaderStageFlagBits::VERTEX,
     );
     let frag_shader = ShaderModule::new(
         device.clone(),
-        include_bytes!("../shaders/mesh.frag.spv"),
+        include_bytes!("../../shaders/mesh.frag.spv"),
         String::from("MeshPipelineFragmentShader"),
         vk::ShaderStageFlagBits::FRAGMENT,
     );
-    let set_layouts: Vec<DescriptorSetLayout> = [
-        DescriptorSetLayout::from_shader(device, &vert_shader),
-        DescriptorSetLayout::from_shader(device, &frag_shader),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+
+    let texture_set_layout = DescriptorSetLayout::from_shader(device, &frag_shader)
+        .remove(&1)
+        .unwrap();
 
     Box::new(move |args| {
-        let set_layouts = set_layouts
-            .iter()
-            .map(|l| **l)
-            .collect::<Vec<vk::DescriptorSetLayout>>();
+        let set_layouts = [&*args.global_set_layout, &texture_set_layout].map(|l| **l);
         let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
             .set_layouts(&set_layouts)
             .push_constant_ranges(&[]);
@@ -519,31 +513,25 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
 fn rgb_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
     let frag_shader = ShaderModule::new(
         device.clone(),
-        include_bytes!("../shaders/rgb_triangle.frag.spv"),
+        include_bytes!("../../shaders/rgb_triangle.frag.spv"),
         String::from(label!("RgbPipelineFragmentShader")),
         vk::ShaderStageFlagBits::FRAGMENT,
     );
     let vert_shader = ShaderModule::new(
         device.clone(),
-        include_bytes!("../shaders/rgb_triangle.vert.spv"),
+        include_bytes!("../../shaders/rgb_triangle.vert.spv"),
         String::from("RgbPipelineVertexShader"),
         vk::ShaderStageFlagBits::VERTEX,
     );
-    let set_layouts: Vec<DescriptorSetLayout> = [
-        DescriptorSetLayout::from_shader(device, &vert_shader),
-        DescriptorSetLayout::from_shader(device, &frag_shader),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
 
     Box::new(move |args| {
         let width = args.width;
         let height = args.height;
         let shader_stages = [&vert_shader, &frag_shader];
+        let set_layouts = vec![args.global_set_layout];
         let set_layouts = set_layouts
             .iter()
-            .map(|l| **l)
+            .map(|l| ****l)
             .collect::<Vec<vk::DescriptorSetLayout>>();
         let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
             .set_layouts(&set_layouts)

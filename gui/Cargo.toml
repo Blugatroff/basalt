@@ -7,5 +7,6 @@ edition = "2021"
 sdl2 = "*"
 basalt = { path = "../basalt/" }
 egui = "*"
-cgmath = "*"
+cgmath = "0.18"
+shaders = { path = "../shaders" }
 

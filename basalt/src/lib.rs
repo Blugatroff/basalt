@@ -16,8 +16,10 @@ macro_rules! label {
     };
 }
 pub use descriptor_sets::DescriptorSetLayout;
+pub use descriptor_sets::DescriptorSetLayoutBinding;
 pub use descriptor_sets::DescriptorSetManager;
 pub use erupt::vk;
+use frame::FrameDataMut;
 pub use handles::Allocator;
 pub use handles::CommandPool;
 pub use handles::Device;
@@ -33,7 +35,7 @@ pub use mesh::DefaultVertex;
 pub use mesh::Mesh;
 pub use mesh::Vertex;
 pub use mesh::VertexInfoDescription;
-pub use shader_types::Object;
+use shaders::IndirectDrawCommand;
 pub use utils::ColorBlendAttachment;
 pub use utils::DepthStencilInfo;
 pub use utils::InputAssemblyState;
@@ -47,11 +49,12 @@ mod descriptor_sets;
 mod frame;
 mod handles;
 mod mesh;
-mod shader_types;
 mod utils;
 use crate::descriptor_sets::DescriptorSet;
-use crate::descriptor_sets::DescriptorSetLayoutBinding;
+use crate::handles::ComputePipeline;
 use crate::handles::DebugUtilsMessenger;
+use crate::utils::create_cull_set;
+use crate::utils::create_indirect_buffer;
 use crate::utils::create_sync_objects;
 use erupt::cstr;
 use frame::FrameData;
@@ -67,8 +70,8 @@ use utils::{
     create_command_buffers, create_debug_messenger_info, create_depth_image_views,
     create_depth_images, create_descriptor_sets, create_device_and_queue, create_framebuffers,
     create_global_descriptor_set_layout, create_instance, create_mesh_buffer,
-    create_mesh_buffer_set, create_physical_device, create_render_pass, create_renderables_buffer,
-    create_swapchain, create_uniform_buffer, pad_uniform_buffer_size,
+    create_physical_device, create_render_pass, create_renderables_buffer, create_swapchain,
+    create_uniform_buffer, pad_uniform_buffer_size,
 };
 
 const LAYER_KHRONOS_VALIDATION: *const c_char = cstr!("VK_LAYER_KHRONOS_validation");
@@ -109,19 +112,7 @@ pub struct PipelineCreationParams<'a> {
     pub width: u32,
     pub height: u32,
     pub render_pass: &'a RenderPass,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-struct GpuMesh {
-    max: cgmath::Vector3<f32>,
-    first_index: u32,
-    min: cgmath::Vector3<f32>,
-    index_count: u32,
-    vertex_offset: i32,
-    _padding_0: u32,
-    _padding_1: u32,
-    _padding_2: u32,
+    pub global_set_layout: &'a Arc<DescriptorSetLayout>,
 }
 
 #[derive(Debug)]
@@ -143,19 +134,6 @@ struct BatchingResult<'a> {
     sets: Vec<Option<Arc<DescriptorSet>>>,
 }
 
-#[allow(dead_code)]
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct IndirectDrawCommand {
-    pub index_count: u32,
-    pub instance_count: u32,
-    pub first_index: u32,
-    pub vertex_offset: i32,
-    pub first_instance: u32,
-    pub draw_count: u32,
-    pub padding: [u32; 2],
-}
-
 pub type MaterialLoadFn = Box<dyn for<'a> Fn(PipelineCreationParams<'a>) -> Pipeline>;
 
 pub struct TransferContext {
@@ -168,13 +146,12 @@ pub struct TransferContext {
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct Renderer {
-    graphics_family: QueueFamily,
-    transfer_family: QueueFamily,
+    compute_pipeline: ComputePipeline,
+    compute_set_layout: DescriptorSetLayout,
     start: std::time::Instant,
     supported_present_modes: Vec<vk::PresentModeKHR>,
     present_mode: vk::PresentModeKHR,
     swapchain: Swapchain,
-    mesh_set_layout: DescriptorSetLayout,
     sampler: Arc<Sampler>,
     width: u32,
     height: u32,
@@ -195,8 +172,8 @@ pub struct Renderer {
     transfer_context: Arc<TransferContext>,
     physical_device_properties: vk::PhysicalDeviceProperties,
     materials: Vec<(Pipeline, MaterialLoadFn)>,
-    global_uniform: shader_types::GlobalUniform,
-    global_set_layout: DescriptorSetLayout,
+    global_uniform: shaders::GlobalUniform,
+    global_set_layout: Arc<DescriptorSetLayout>,
     surface: Surface,
     format: vk::SurfaceFormatKHR,
     physical_device: vk::PhysicalDevice,
@@ -320,7 +297,7 @@ impl Renderer {
             &physical_device_properties.limits,
         );
 
-        let global_uniform = shader_types::GlobalUniform {
+        let global_uniform = shaders::GlobalUniform {
             view: cgmath::Matrix4::from_scale(0.1),
             proj: cgmath::Matrix4::from_scale(0.1),
             view_proj: cgmath::Matrix4::from_scale(0.1),
@@ -334,7 +311,7 @@ impl Renderer {
             .iter()
             .map(|size| create_renderables_buffer(allocator.clone(), *size as u64))
             .collect::<Vec<_>>();
-        let global_set_layout = create_global_descriptor_set_layout(device.clone());
+        let global_set_layout = Arc::new(create_global_descriptor_set_layout(device.clone()));
         let filter = vk::Filter::NEAREST;
         let address_mode = vk::SamplerAddressMode::REPEAT;
         let sampler = vk::SamplerCreateInfoBuilder::new()
@@ -356,27 +333,72 @@ impl Renderer {
             })
             .collect::<Vec<_>>();
         let mesh_buffers = (0..frames_in_flight)
-            .map(|_| create_mesh_buffer(allocator.clone(), std::mem::size_of::<GpuMesh>() as u64))
-            .collect::<Vec<_>>();
-        let mesh_set_layout = DescriptorSetLayout::new(
-            device.clone(),
-            vec![DescriptorSetLayoutBinding {
-                binding: 0,
-                count: 1,
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage_flags: vk::ShaderStageFlags::COMPUTE,
-                immutable_samplers: None,
-            }],
-            None,
-        );
-
-        let mesh_sets = mesh_buffers
-            .iter()
-            .map(|buffer| {
-                create_mesh_buffer_set(&device, &descriptor_set_manager, buffer, &mesh_set_layout)
+            .map(|_| {
+                Arc::new(create_mesh_buffer(
+                    allocator.clone(),
+                    std::mem::size_of::<shaders::Mesh>() as u64,
+                ))
             })
             .collect::<Vec<_>>();
+        let compute_set_layout = DescriptorSetLayout::new(
+            device.clone(),
+            vec![
+                DescriptorSetLayoutBinding {
+                    binding: 0,
+                    count: 1,
+                    ty: vk::DescriptorType::STORAGE_BUFFER,
+                    stage_flags: vk::ShaderStageFlags::COMPUTE,
+                    immutable_samplers: None,
+                },
+                DescriptorSetLayoutBinding {
+                    binding: 1,
+                    count: 1,
+                    ty: vk::DescriptorType::STORAGE_BUFFER,
+                    stage_flags: vk::ShaderStageFlags::COMPUTE,
+                    immutable_samplers: None,
+                },
+            ],
+            None,
+        );
+        let buffer_info = vk::BufferCreateInfoBuilder::new()
+            .size(std::mem::size_of::<shaders::IndirectDrawCommand>() as u64 * 2)
+            .usage(
+                vk::BufferUsageFlags::INDIRECT_BUFFER
+                    | vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+            );
+
+        let indirect_buffers = (0..frames_in_flight)
+            .map(|_| {
+                Arc::new(buffer::Allocated::new(
+                    allocator.clone(),
+                    *buffer_info,
+                    vk_mem_erupt::MemoryUsage::CpuToGpu,
+                    Default::default(),
+                    label!("IndirectBuffer"),
+                ))
+            })
+            .collect();
+        let cull_sets = mesh_buffers
+            .iter()
+            .zip(&indirect_buffers)
+            .map(
+                |(mesh_buffer, indirect_buffer): (
+                    &Arc<buffer::Allocated>,
+                    &Arc<buffer::Allocated>,
+                )| {
+                    create_cull_set(
+                        &device,
+                        &descriptor_set_manager,
+                        &compute_set_layout,
+                        mesh_buffer.clone(),
+                        indirect_buffer.clone(),
+                    )
+                },
+            )
+            .collect::<Vec<_>>();
         let cleanup = (0..frames_in_flight).map(|_| None).collect();
+
         let frames = Frames {
             present_semaphores,
             render_fences,
@@ -388,8 +410,9 @@ impl Renderer {
             renderables_buffers,
             max_objects,
             mesh_buffers,
-            mesh_sets,
+            cull_sets,
             cleanup,
+            indirect_buffers,
         };
         let materials: Vec<MaterialLoadFn> = Vec::new();
 
@@ -403,6 +426,7 @@ impl Renderer {
                         width,
                         height,
                         render_pass: &render_pass,
+                        global_set_layout: &global_set_layout,
                     }),
                     f,
                 )
@@ -445,15 +469,36 @@ impl Renderer {
         };
         let sampler = Arc::new(sampler);
         drop(w);
+        let cull_shader = ShaderModule::new(
+            device.clone(),
+            include_bytes!("../../shaders/cull.comp.spv"),
+            String::from("CullShader"),
+            vk::ShaderStageFlagBits::VERTEX,
+        );
+
+        let compute_set_layouts = [**global_set_layout, *compute_set_layout];
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
+            .set_layouts(&compute_set_layouts)
+            .flags(vk::PipelineLayoutCreateFlags::default());
+        let compute_pipeline_layout = Arc::new(PipelineLayout::new(
+            device.clone(),
+            &pipeline_layout_info,
+            "CullPipelineLayout",
+        ));
+        let compute_pipeline = ComputePipeline::new(
+            device.clone(),
+            compute_pipeline_layout.clone(),
+            &cull_shader,
+            "CullPipeline",
+        );
         let keep_alive = Vec::from([Box::new(window) as Box<dyn std::any::Any + 'static>]);
         Self {
-            graphics_family,
-            transfer_family,
+            compute_pipeline,
             start,
             supported_present_modes,
+            compute_set_layout,
             present_mode,
             swapchain,
-            mesh_set_layout,
             sampler,
             width,
             height,
@@ -516,6 +561,7 @@ impl Renderer {
             width: self.width,
             height: self.height,
             render_pass: &self.render_pass,
+            global_set_layout: &self.global_set_layout,
         }
     }
     pub fn register_pipeline(&mut self, create_fn: MaterialLoadFn) -> usize {
@@ -593,18 +639,32 @@ impl Renderer {
         self.frames
             .mesh_buffers
             .resize_with(self.frames_in_flight, || {
-                create_mesh_buffer(self.allocator.clone(), size)
+                Arc::new(create_mesh_buffer(self.allocator.clone(), size))
             });
-        self.frames.mesh_sets = self
+        let size = self
+            .frames
+            .indirect_buffers
+            .get(0)
+            .map(|b| b.size)
+            .unwrap_or(100) as usize
+            / std::mem::size_of::<IndirectDrawCommand>();
+        self.frames
+            .indirect_buffers
+            .resize_with(self.frames_in_flight, || {
+                Arc::new(create_indirect_buffer(self.allocator.clone(), size))
+            });
+        self.frames.cull_sets = self
             .frames
             .mesh_buffers
             .iter()
-            .map(|buffer| {
-                create_mesh_buffer_set(
+            .zip(&self.frames.indirect_buffers)
+            .map(|(mesh_buffer, indirect_buffer)| {
+                create_cull_set(
                     &self.device,
                     &self.descriptor_set_manager,
-                    buffer,
-                    &self.mesh_set_layout,
+                    &self.compute_set_layout,
+                    mesh_buffer.clone(),
+                    indirect_buffer.clone(),
                 )
             })
             .collect();
@@ -700,14 +760,14 @@ impl Renderer {
         let ptr = self.uniform_buffer.map();
         let global_uniform_offset: u32 = (pad_uniform_buffer_size(
             &self.physical_device_properties.limits,
-            std::mem::size_of::<shader_types::GlobalUniform>() as u64,
+            std::mem::size_of::<shaders::GlobalUniform>() as u64,
         ) * frame_index as u64)
             .try_into()
             .unwrap();
         unsafe {
             let current_global_uniform_ptr = ptr.add(global_uniform_offset as usize);
             std::ptr::write(
-                current_global_uniform_ptr as *mut shader_types::GlobalUniform,
+                current_global_uniform_ptr as *mut shaders::GlobalUniform,
                 self.global_uniform,
             );
         }
@@ -770,7 +830,7 @@ impl Renderer {
         }
     }
     fn write_renderables(buffer: &buffer::Allocated, instancing_batches: &[InstancingBatch]) {
-        let ptr = buffer.map().cast::<shader_types::Object>() as *mut shader_types::Object;
+        let ptr = buffer.map().cast::<shaders::Object>() as *mut shaders::Object;
         let num_renderables = instancing_batches.iter().map(|b| b.renderables.len()).sum();
         let slice = unsafe { std::slice::from_raw_parts_mut(ptr, num_renderables) };
         let mut i = 0;
@@ -790,18 +850,18 @@ impl Renderer {
         buffer.unmap();
     }
     fn write_meshes(buffer: &buffer::Allocated, meshes: &[Arc<Mesh>]) {
-        let ptr = buffer.map().cast::<GpuMesh>() as *mut GpuMesh;
+        let ptr = buffer.map().cast::<shaders::Mesh>() as *mut shaders::Mesh;
         let slice = unsafe { std::slice::from_raw_parts_mut(ptr, meshes.len()) };
         for (i, mesh) in meshes.iter().enumerate() {
-            slice[i] = GpuMesh {
-                max: mesh.bounds.max,
+            slice[i] = shaders::Mesh {
+                bounds_max: mesh.bounds.max,
                 first_index: mesh.index_start,
-                min: mesh.bounds.min,
+                bounds_min: mesh.bounds.min,
                 index_count: mesh.index_count,
                 vertex_offset: mesh.vertex_start.try_into().unwrap(),
-                _padding_0: Default::default(),
-                _padding_1: Default::default(),
-                _padding_2: Default::default(),
+                padding_0: Default::default(),
+                padding_1: Default::default(),
+                padding_2: Default::default(),
             };
         }
         buffer.unmap();
@@ -822,7 +882,7 @@ impl Renderer {
     }
     fn resize_renderable_buffer_if_necessary(&mut self, frame: usize, renderables_count: usize) {
         let frame = self.frames.get_mut(frame);
-        if renderables_count as u64 * std::mem::size_of::<shader_types::Object>() as u64
+        if renderables_count as u64 * std::mem::size_of::<shaders::Object>() as u64
             > frame.renderables_buffer.size
         {
             let new_length = (renderables_count / 2 * 3).max(16) as u64;
@@ -834,6 +894,28 @@ impl Renderer {
                 &self.global_set_layout,
                 &self.uniform_buffer,
                 &*frame.renderables_buffer,
+            );
+        }
+    }
+    fn resize_indirect_buffer_if_necessary(
+        device: &Device,
+        descriptor_set_manager: &DescriptorSetManager,
+        compute_set_layout: &DescriptorSetLayout,
+        allocator: Arc<Allocator>,
+        frame: &mut FrameDataMut,
+        batches: &[InstancingBatch],
+    ) {
+        if batches.len() as u64 * std::mem::size_of::<shaders::IndirectDrawCommand>() as u64
+            > frame.indirect_buffer.size
+        {
+            let new_length = (batches.len() / 2 * 3).max(16);
+            *frame.indirect_buffer = Arc::new(create_indirect_buffer(allocator, new_length));
+            *frame.cull_set = create_cull_set(
+                device,
+                descriptor_set_manager,
+                compute_set_layout,
+                frame.mesh_buffer.clone(),
+                frame.indirect_buffer.clone(),
             );
         }
     }
@@ -869,31 +951,29 @@ impl Renderer {
                 }
             })
             .0;
-        let mesh_buffer_min_size = meshes * std::mem::size_of::<GpuMesh>();
+        let mesh_buffer_min_size = meshes * std::mem::size_of::<shaders::Mesh>();
         if mesh_buffer_min_size as u64 > frame.mesh_buffer.size {
-            *frame.mesh_buffer =
-                create_mesh_buffer(self.allocator.clone(), mesh_buffer_min_size as u64 / 2 * 3);
-            *frame.mesh_set = create_mesh_buffer_set(
+            *frame.mesh_buffer = Arc::new(create_mesh_buffer(
+                self.allocator.clone(),
+                mesh_buffer_min_size as u64 / 2 * 3,
+            ));
+            *frame.cull_set = create_cull_set(
                 &self.device,
                 &self.descriptor_set_manager,
-                frame.mesh_buffer,
-                &self.mesh_set_layout,
+                &self.compute_set_layout,
+                frame.mesh_buffer.clone(),
+                frame.indirect_buffer.clone(),
             );
         }
     }
     fn begin_render_pass(
         &self,
-        frame_index: usize,
+        frame: &FrameData,
         swapchain_image_index: usize,
         clear_color: [f32; 4],
     ) -> vk::CommandBuffer {
-        let frame = self.frames.get(frame_index);
         let cmd = *frame.command_buffer;
         unsafe {
-            self.device.reset_command_buffer(cmd, None).unwrap();
-            let begin_info = vk::CommandBufferBeginInfoBuilder::new()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            self.device.begin_command_buffer(cmd, &begin_info).unwrap();
             let clear_values = &[
                 vk::ClearValue {
                     color: vk::ClearColorValue {
@@ -922,6 +1002,67 @@ impl Renderer {
                 .cmd_begin_render_pass(cmd, &rp_begin_info, vk::SubpassContents::INLINE);
         }
         cmd
+    }
+    fn begin_command_buffer(&self, frame: &FrameData) {
+        unsafe {
+            let cmd = *frame.command_buffer;
+            self.device.reset_command_buffer(cmd, None).unwrap();
+            let begin_info = vk::CommandBufferBeginInfoBuilder::new()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.device.begin_command_buffer(cmd, &begin_info).unwrap();
+        }
+    }
+    fn record_cull_dispatch(
+        &self,
+        frame: &FrameData,
+        instancing_batches: &[InstancingBatch],
+        renderables_len: usize,
+        global_uniform_offset: u32,
+    ) {
+        let cmd = *frame.command_buffer;
+        unsafe {
+            self.device.cmd_fill_buffer(
+                cmd,
+                ***frame.indirect_buffer,
+                0,
+                (std::mem::size_of::<IndirectDrawCommand>() * instancing_batches.len()) as u64,
+                0,
+            );
+            self.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                *self.compute_pipeline,
+            );
+
+            self.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                ***self.compute_pipeline.layout(),
+                0,
+                &[**frame.descriptor_set, **frame.cull_set],
+                &[global_uniform_offset],
+            );
+
+            let group_count_x = (renderables_len as u32 / 256) + 1;
+            self.device.cmd_dispatch(cmd, group_count_x, 1, 1);
+
+            let buffer_memory_barrier = vk::BufferMemoryBarrierBuilder::new()
+                .buffer(***frame.indirect_buffer)
+                .size(frame.indirect_buffer.size)
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::MEMORY_READ);
+            let src_stage_mask = vk::PipelineStageFlags::COMPUTE_SHADER;
+            let dst_stage_mask = vk::PipelineStageFlags::DRAW_INDIRECT;
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                Some(src_stage_mask),
+                Some(dst_stage_mask),
+                None,
+                &[],
+                &[buffer_memory_barrier],
+                &[],
+            );
+        }
     }
     fn record_draws(
         &self,
@@ -1019,7 +1160,6 @@ impl Renderer {
             log::warn!("{:#?}", res);
         }
     }
-    #[allow(clippy::missing_panics_doc)]
     pub fn render(
         &mut self,
         renderables: &[Renderable],
@@ -1049,7 +1189,15 @@ impl Renderer {
             meshes,
             sets: custom_sets,
         } = Self::batch_renderables(&self.materials, renderables);
-        let frame = self.frames.get_mut(frame_index);
+        let mut frame = self.frames.get_mut(frame_index);
+        Self::resize_indirect_buffer_if_necessary(
+            &self.device,
+            &self.descriptor_set_manager,
+            &self.compute_set_layout,
+            self.allocator.clone(),
+            &mut frame,
+            &batches,
+        );
         let swapchain_image_index =
             match Self::acquire_swapchain_image(&self.device, &self.swapchain, &frame.immu()) {
                 Some(i) => i,
@@ -1062,7 +1210,10 @@ impl Renderer {
             drop(custom_sets);
         }) as Box<dyn FnOnce()>);
         drop(frame);
-        let cmd = self.begin_render_pass(frame_index, swapchain_image_index, [0.15, 0.6, 0.9, 1.0]);
+        let frame = self.frames.get(frame_index);
+        self.begin_command_buffer(&frame);
+        self.record_cull_dispatch(&frame, &batches, renderables.len(), global_uniform_offset);
+        let cmd = self.begin_render_pass(&frame, swapchain_image_index, [0.15, 0.6, 0.9, 1.0]);
         self.record_draws(frame_index, global_uniform_offset, &batches, cmd);
         self.submit_cmd(frame_index, cmd);
         self.present(frame_index, swapchain_image_index);
@@ -1092,8 +1243,9 @@ impl Drop for Renderer {
                 .unwrap();
             log::info!(label!("Waiting for Idle"));
             self.device.device_wait_idle().unwrap();
-            log::info!(label!("DROPPING App"));
+            drop(self.messenger.take());
             drop((guard_0, guard_1));
+            log::info!(label!("DROPPING App"));
         };
     }
 }

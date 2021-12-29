@@ -1,9 +1,7 @@
 use basalt::{
-    buffer,
-    image::{self, Loader},
-    label, vk, vk_mem_erupt, Allocator, ColorBlendAttachment, DepthStencilInfo,
-    DescriptorSetLayout, InputAssemblyState, Mesh, MultiSamplingState, Pipeline, PipelineDesc,
-    PipelineLayout, RasterizationState, Renderable, Renderer, Sampler, ShaderModule,
+    buffer, image::Loader, label, vk, vk_mem_erupt, Allocator, ColorBlendAttachment,
+    DepthStencilInfo, DescriptorSetLayout, InputAssemblyState, Mesh, MultiSamplingState, Pipeline,
+    PipelineDesc, PipelineLayout, RasterizationState, Renderable, Renderer, Sampler, ShaderModule,
 };
 use sdl2::event::Event;
 use std::sync::Arc;
@@ -87,7 +85,7 @@ impl EguiVertex {
                 .input_rate(vk::VertexInputRate::VERTEX),
             vk::VertexInputBindingDescriptionBuilder::new()
                 .binding(1)
-                .stride(std::mem::size_of::<basalt::Object>().try_into().unwrap())
+                .stride(std::mem::size_of::<shaders::Object>().try_into().unwrap())
                 .input_rate(vk::VertexInputRate::INSTANCE),
         ];
         let attributes = vec![
@@ -131,33 +129,27 @@ impl EruptEgui {
     pub fn new(app: &mut Renderer, frames_in_flight: usize) -> Self {
         let vert_shader = ShaderModule::new(
             app.device().clone(),
-            include_bytes!("./egui.vert.spv"),
+            include_bytes!("../../shaders/egui.vert.spv"),
             String::from(label!("EguiVertexShader")),
             vk::ShaderStageFlagBits::VERTEX,
         );
         let frag_shader = ShaderModule::new(
             app.device().clone(),
-            include_bytes!("./egui.frag.spv"),
+            include_bytes!("../../shaders/egui.frag.spv"),
             String::from("EguiFragmentShader"),
             vk::ShaderStageFlagBits::FRAGMENT,
         );
-        let set_layouts: Vec<DescriptorSetLayout> = [
-            DescriptorSetLayout::from_shader(app.device(), &vert_shader),
-            DescriptorSetLayout::from_shader(app.device(), &frag_shader),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+
+        let texture_set_layout = DescriptorSetLayout::from_shader(app.device(), &frag_shader)
+            .remove(&1)
+            .unwrap();
 
         let pipeline = app.register_pipeline(Box::new(move |params| {
             let vertex_description = EguiVertex::get_vertex_description();
             let width = params.width;
             let height = params.height;
             let shader_stages = [&vert_shader, &frag_shader];
-            let set_layouts = set_layouts
-                .iter()
-                .map(|l| **l)
-                .collect::<Vec<vk::DescriptorSetLayout>>();
+            let set_layouts = [&*params.global_set_layout, &texture_set_layout].map(|l| **l);
             let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
                 .set_layouts(&set_layouts)
                 .push_constant_ranges(&[]);
@@ -320,7 +312,7 @@ impl EruptEgui {
             self.font_texture_version = texture.version;
             self.upload_font_texture(
                 &renderer.image_loader().clone(),
-                &renderer.descriptor_set_manager(),
+                renderer.descriptor_set_manager(),
                 &texture,
             );
         }

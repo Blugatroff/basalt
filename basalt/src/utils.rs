@@ -1,17 +1,15 @@
+use crate::buffer;
 use crate::handles::{Device, Fence, Instance, Queue, QueueFamily, Semaphore};
 use crate::image;
-use crate::{buffer, shader_types};
 use crate::{
     debug_callback,
     descriptor_sets::{
         DescriptorSet, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetManager,
     },
-    handles::{
-        Allocator, CommandPool, Framebuffer, ImageView, RenderPass, ShaderModule, Swapchain,
-    },
+    handles::{Allocator, CommandPool, Framebuffer, ImageView, RenderPass, Swapchain},
     TransferContext, LAYER_KHRONOS_VALIDATION,
 };
-use erupt::{cstr, vk, DeviceLoader, InstanceLoader};
+use erupt::{vk, DeviceLoader, InstanceLoader};
 use std::{
     ffi::{CStr, CString},
     sync::Arc,
@@ -104,17 +102,6 @@ impl MultiSamplingState {
     }
 }
 
-pub fn pipeline_shader_stage_create_info(
-    stage: vk::ShaderStageFlagBits,
-    shader_module: &ShaderModule,
-) -> vk::PipelineShaderStageCreateInfoBuilder {
-    let mut info = vk::PipelineShaderStageCreateInfoBuilder::new()
-        .stage(stage)
-        .module(**shader_module);
-    info.p_name = cstr!("main");
-    info
-}
-
 pub fn create_global_descriptor_set_layout(device: Arc<Device>) -> DescriptorSetLayout {
     DescriptorSetLayout::new(
         device,
@@ -123,14 +110,14 @@ pub fn create_global_descriptor_set_layout(device: Arc<Device>) -> DescriptorSet
                 binding: 0,
                 count: 1,
                 ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                stage_flags: vk::ShaderStageFlags::VERTEX,
+                stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
                 immutable_samplers: None,
             },
             DescriptorSetLayoutBinding {
                 binding: 1,
                 count: 1,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage_flags: vk::ShaderStageFlags::VERTEX,
+                stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
                 immutable_samplers: None,
             },
         ],
@@ -220,10 +207,9 @@ pub fn create_uniform_buffer(
     frames_in_flight: u64,
     limits: &vk::PhysicalDeviceLimits,
 ) -> buffer::Allocated {
-    let size = pad_uniform_buffer_size(
-        limits,
-        std::mem::size_of::<shader_types::GlobalUniform>() as u64,
-    ) * frames_in_flight;
+    let size =
+        pad_uniform_buffer_size(limits, std::mem::size_of::<shaders::GlobalUniform>() as u64)
+            * frames_in_flight;
 
     buffer::Allocated::new(
         allocator,
@@ -247,7 +233,7 @@ pub fn create_descriptor_sets(
 
     let global_uniform_buffer_info = vk::DescriptorBufferInfoBuilder::new()
         .buffer(**uniform_buffer)
-        .range(std::mem::size_of::<shader_types::GlobalUniform>() as u64);
+        .range(std::mem::size_of::<shaders::GlobalUniform>() as u64);
     let global_uniform_buffer_info = &[global_uniform_buffer_info];
 
     let uniform_write = vk::WriteDescriptorSetBuilder::new()
@@ -593,7 +579,7 @@ pub fn create_physical_device(
                         .queue_flags
                         .contains(vk::QueueFlags::TRANSFER) && queue_family_properties
                         .queue_flags.contains(vk::QueueFlags::COMPUTE) && i != graphics_family_i as usize
-                }).map(|i| i.try_into().unwrap());
+                });
 
             let transfer_family = transfer_family.map(|a| a as u32).map(QueueFamily);
             let formats = instance
@@ -687,17 +673,6 @@ impl ColorBlendAttachment {
     }
 }
 
-pub fn create_debug_messenger(
-    instance: &InstanceLoader,
-    messenger_info: &vk::DebugUtilsMessengerCreateInfoEXT,
-    validation_layers: bool,
-) -> vk::DebugUtilsMessengerEXT {
-    if validation_layers {
-        unsafe { instance.create_debug_utils_messenger_ext(messenger_info, None) }.unwrap()
-    } else {
-        erupt::vk::DebugUtilsMessengerEXT::default()
-    }
-}
 pub fn create_debug_messenger_info() -> vk::DebugUtilsMessengerCreateInfoEXTBuilder<'static> {
     vk::DebugUtilsMessengerCreateInfoEXTBuilder::new()
         .message_severity(
@@ -714,7 +689,7 @@ pub fn create_debug_messenger_info() -> vk::DebugUtilsMessengerCreateInfoEXTBuil
 }
 
 pub fn create_renderables_buffer(allocator: Arc<Allocator>, max_objects: u64) -> buffer::Allocated {
-    let size = std::mem::size_of::<shader_types::Object>() as u64 * max_objects;
+    let size = std::mem::size_of::<shaders::Object>() as u64 * max_objects;
     buffer::Allocated::new(
         allocator,
         *vk::BufferCreateInfoBuilder::new()
@@ -758,30 +733,6 @@ where
         drop(command_pool);
         drop(fence);
     }
-}
-
-pub fn create_mesh_buffer_set(
-    device: &Device,
-    descriptor_set_manager: &DescriptorSetManager,
-    buffer: &buffer::Allocated,
-    set_layout: &DescriptorSetLayout,
-) -> DescriptorSet {
-    let set = descriptor_set_manager.allocate(set_layout, None);
-    let write_buffer_info = vk::DescriptorBufferInfoBuilder::new()
-        .buffer(**buffer)
-        .range(buffer.size)
-        .offset(0);
-    let buffer_info = &[write_buffer_info];
-    let write = vk::WriteDescriptorSetBuilder::new()
-        .buffer_info(buffer_info)
-        .dst_set(*set)
-        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-        .dst_binding(0);
-    let writes = [write];
-    unsafe {
-        device.update_descriptor_sets(&writes, &[]);
-    }
-    set
 }
 
 pub fn create_mesh_buffer(allocator: Arc<Allocator>, size: u64) -> buffer::Allocated {
@@ -843,4 +794,59 @@ pub fn log_resource_created(typename: &'static str, name: &str) {
 pub fn log_resource_dropped(typename: &'static str, name: &str) {
     use ::colored::*;
     ::log::info!("{} {}! {}", "DROPPED".red(), typename, name);
+}
+
+pub fn create_indirect_buffer(allocator: Arc<Allocator>, size: usize) -> buffer::Allocated {
+    let buffer_info = vk::BufferCreateInfoBuilder::new()
+        .size(std::mem::size_of::<shaders::IndirectDrawCommand>() as u64 * size as u64)
+        .usage(
+            vk::BufferUsageFlags::INDIRECT_BUFFER
+                | vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST,
+        );
+    buffer::Allocated::new(
+        allocator,
+        *buffer_info,
+        vk_mem_erupt::MemoryUsage::CpuToGpu,
+        Default::default(),
+        label!("IndirectBuffer"),
+    )
+}
+
+pub fn create_cull_set(
+    device: &Device,
+    descriptor_set_manager: &DescriptorSetManager,
+    layout: &DescriptorSetLayout,
+    mesh_buffer: Arc<buffer::Allocated>,
+    indirect_buffer: Arc<buffer::Allocated>,
+) -> DescriptorSet {
+    dbg!(&layout);
+    let mut set = descriptor_set_manager.allocate(layout, None);
+    let buffer_info = vk::DescriptorBufferInfoBuilder::new()
+        .buffer(**mesh_buffer)
+        .offset(0)
+        .range(mesh_buffer.size);
+    let buffer_info = [buffer_info];
+    let mesh_buffer_write = vk::WriteDescriptorSetBuilder::new()
+        .buffer_info(&buffer_info)
+        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+        .dst_set(*set)
+        .dst_binding(0)
+        .dst_array_element(0);
+
+    let buffer_info = vk::DescriptorBufferInfoBuilder::new()
+        .buffer(**indirect_buffer)
+        .offset(0)
+        .range(indirect_buffer.size);
+    let buffer_info = [buffer_info];
+    let indirect_buffer_write = vk::WriteDescriptorSetBuilder::new()
+        .buffer_info(&buffer_info)
+        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+        .dst_set(*set)
+        .dst_binding(1)
+        .dst_array_element(0);
+    let writes = [mesh_buffer_write, indirect_buffer_write];
+    unsafe { device.update_descriptor_sets(&writes, &[]) };
+    set.attach_resources(Box::new((mesh_buffer, indirect_buffer)));
+    set
 }

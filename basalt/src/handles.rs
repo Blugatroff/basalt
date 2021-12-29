@@ -220,13 +220,14 @@ pub struct PipelineDesc<'a> {
 pub struct ComputePipeline {
     pipeline: vk::Pipeline,
     device: Arc<Device>,
+    layout: Arc<PipelineLayout>,
     name: String,
 }
 impl ComputePipeline {
     #[allow(dead_code)]
     pub fn new(
         device: Arc<Device>,
-        layout: &PipelineLayout,
+        layout: Arc<PipelineLayout>,
         shader_module: &ShaderModule,
         name: impl Into<String>,
     ) -> Self {
@@ -253,7 +254,11 @@ impl ComputePipeline {
             pipeline,
             device,
             name,
+            layout,
         }
+    }
+    pub fn layout(&self) -> &Arc<PipelineLayout> {
+        &self.layout
     }
 }
 
@@ -336,6 +341,9 @@ impl Pipeline {
     }
     pub fn layout(&self) -> &PipelineLayout {
         &self.layout
+    }
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 

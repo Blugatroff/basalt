@@ -8,5 +8,5 @@ name = "extract_structs"
 path = "./src/main.rs"
 
 [dependencies]
-spirq = "*"
+spirq = { git = "https://github.com/PENGUINLIONG/spirq-rs" }
 

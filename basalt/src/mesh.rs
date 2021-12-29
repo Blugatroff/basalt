@@ -1,7 +1,6 @@
 use crate::buffer;
 use crate::handles::Allocator;
 use crate::handles::Device;
-use crate::shader_types;
 use crate::utils::{immediate_submit, round_to};
 use crate::TransferContext;
 use erupt::vk;
@@ -14,7 +13,7 @@ pub struct VertexInfoDescription {
 }
 
 impl VertexInfoDescription {
-    pub fn builder<'a>(&'a self) -> vk::PipelineVertexInputStateCreateInfoBuilder<'a> {
+    pub fn builder(&self) -> vk::PipelineVertexInputStateCreateInfoBuilder {
         vk::PipelineVertexInputStateCreateInfoBuilder::new()
             .vertex_binding_descriptions(&self.bindings)
             .vertex_attribute_descriptions(&self.attributes)
@@ -46,11 +45,7 @@ impl Vertex for DefaultVertex {
                 .input_rate(vk::VertexInputRate::VERTEX),
             vk::VertexInputBindingDescriptionBuilder::new()
                 .binding(1)
-                .stride(
-                    std::mem::size_of::<shader_types::Object>()
-                        .try_into()
-                        .unwrap(),
-                )
+                .stride(std::mem::size_of::<shaders::Object>().try_into().unwrap())
                 .input_rate(vk::VertexInputRate::INSTANCE),
         ];
         let attributes = vec![
@@ -276,21 +271,21 @@ impl Mesh {
             mesh.buffer = Arc::clone(&device_local_buffer);
         }
     }
+    const fn obj_options() -> tobj::LoadOptions {
+        tobj::LoadOptions {
+            single_index: true,
+            triangulate: true,
+            ignore_points: true,
+            ignore_lines: true,
+        }
+    }
     pub fn load<P: AsRef<std::path::Path> + std::fmt::Debug>(
         allocator: Arc<Allocator>,
         path: P,
         transfer_context: &TransferContext,
         device: &Arc<Device>,
     ) -> Result<Vec<Self>, tobj::LoadError> {
-        let (models, _) = tobj::load_obj(
-            &path,
-            &tobj::LoadOptions {
-                single_index: true,
-                triangulate: true,
-                ignore_points: true,
-                ignore_lines: true,
-            },
-        )?;
+        let (models, _) = tobj::load_obj(&path, &Self::obj_options())?;
         let mut meshes = models
             .into_iter()
             .map(|model| {

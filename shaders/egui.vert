@@ -1,3 +1,6 @@
+#version 460
+#include <common.glsl>
+
 layout (location = 0) in vec2 vPos;
 layout (location = 1) in vec2 vUv;
 layout (location = 2) in vec4 vColor;
@@ -18,9 +21,6 @@ vec4 linear_from_srgba(vec4 srgba) {
 
 void main() {
     uint index = objectBuffer.objects[gl_InstanceIndex].redirect;
-    if (globalUniform.screenWidth > 100000) {
-        index = 00;    
-    }
     Object object = objectBuffer.objects[index];
     gl_Position = object.transform * vec4(vPos, 0.0, 1.0);
     uv = vUv;

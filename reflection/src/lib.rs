@@ -44,6 +44,7 @@ impl From<u32> for VectorLength {
 pub enum ScalarType {
     Float,
     Uint,
+    Int,
 }
 
 impl std::fmt::Display for ScalarType {
@@ -51,6 +52,7 @@ impl std::fmt::Display for ScalarType {
         f.write_str(match self {
             ScalarType::Float => "f32",
             ScalarType::Uint => "u32",
+            &ScalarType::Int => "i32",
         })
     }
 }
@@ -162,6 +164,7 @@ impl From<&spirq::Type> for Type {
             }
             spirq::Type::Sampler() => Self::Sampler,
             spirq::Type::SampledImage(_) => Self::SampledImage,
+            spirq::Type::Scalar(spirq::ty::ScalarType::Signed(4)) => Self::Scalar(ScalarType::Int),
             _ => {
                 unimplemented!()
             }
@@ -269,7 +272,6 @@ impl From<&EntryPoint> for Shader {
                 types.push(ty.clone());
                 types
             });
-
         Self {
             name,
             inputs,

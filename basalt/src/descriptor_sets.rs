@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     marker::PhantomData,
     sync::{Arc, Mutex, RwLock},
 };
@@ -14,6 +15,12 @@ pub struct DescriptorSetLayout {
     layout: vk::DescriptorSetLayout,
     device: Arc<Device>,
     bindings: Vec<DescriptorSetLayoutBinding>,
+}
+
+impl DescriptorSetLayout {
+    pub fn bindings(&self) -> &[DescriptorSetLayoutBinding] {
+        &self.bindings
+    }
 }
 
 impl<'a> std::ops::Deref for DescriptorSetLayout {
@@ -73,21 +80,17 @@ impl<'a> From<&'a DescriptorSetLayoutBinding> for vk::DescriptorSetLayoutBinding
 }
 
 impl DescriptorSetLayout {
-    pub fn from_shader(device: &Arc<Device>, shader: &ShaderModule) -> Vec<Self> {
+    pub fn from_shader(device: &Arc<Device>, shader: &ShaderModule) -> BTreeMap<u32, Self> {
         let reflection = shader.reflection();
-        let mut sets: Vec<Vec<DescriptorSetLayoutBinding>> = Vec::new();
+        let mut sets: BTreeMap<u32, Vec<DescriptorSetLayoutBinding>> = BTreeMap::new();
         for descriptor in &reflection.descriptors {
             let set = descriptor.set;
             let descriptor =
                 DescriptorSetLayoutBinding::from_reflection(descriptor, shader.stage().bitmask());
-            if let Some(set) = sets.get_mut(set as usize) {
-                set.push(descriptor);
-            } else {
-                sets.push(Vec::from([descriptor]));
-            }
+            sets.entry(set).or_insert_with(Vec::new).push(descriptor);
         }
         sets.into_iter()
-            .map(|d| Self::new(device.clone(), d, None))
+            .map(|(k, v)| (k, Self::new(device.clone(), v, None)))
             .collect()
     }
     pub fn new(
@@ -180,20 +183,25 @@ impl DescriptorPoolInner {
     pub fn free_slots_remaining(&self) -> u32 {
         self.max_sets - self.used
     }
-    pub fn check_for_space(&self, bindings: &[DescriptorSetLayoutBinding]) -> bool {
+    pub fn attempt_to_insert(&mut self, bindings: &[DescriptorSetLayoutBinding]) -> bool {
         if self.free_slots_remaining() == 0 {
             return false;
         }
-        for binding in bindings {
-            if self
-                .pool_sizes
-                .iter()
-                .any(|(ty, free)| binding.ty == *ty && free >= &binding.count)
+        let mut unique_bindings: Vec<(vk::DescriptorType, u32)> = self.pool_sizes.clone();
+        'outer: for binding in bindings {
+            for (_, free) in unique_bindings
+                .iter_mut()
+                .filter(|(ty, _)| *ty == binding.ty)
             {
-                return true;
+                if *free >= binding.count {
+                    *free -= binding.count;
+                    continue 'outer;
+                }
+                return false;
             }
         }
-        false
+        self.pool_sizes = unique_bindings;
+        true
     }
     pub fn reset(&mut self) {
         self.used = 0;
@@ -202,13 +210,8 @@ impl DescriptorPoolInner {
         unsafe { self.device.reset_descriptor_pool(self.pool, None) }.unwrap();
     }
     pub fn allocate_set(&mut self, layout: &DescriptorSetLayout) -> Option<vk::DescriptorSet> {
-        if !self.check_for_space(&layout.bindings) {
+        if !self.attempt_to_insert(&layout.bindings) {
             return None;
-        }
-        for binding in &layout.bindings {
-            if let Some((_, free)) = self.pool_sizes.iter_mut().find(|(ty, _)| *ty == binding.ty) {
-                *free -= binding.count;
-            }
         }
         let set_layouts = &[**layout];
         let alloc_info = vk::DescriptorSetAllocateInfoBuilder::new()
