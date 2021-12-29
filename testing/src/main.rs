@@ -193,10 +193,10 @@ impl State {
             uncullable: false,
         };
 
-        let s = 5;
-        for x in 0..s {
-            for y in 0..s {
-                for z in 0..s {
+        let s = 10;
+        for x in -s..s {
+            for y in -s..s {
+                for z in -s..s {
                     suzanne.transform = cgmath::Matrix4::from_translation(cgmath::Vector3::new(
                         x as f32, y as f32, z as f32,
                     ));

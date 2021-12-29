@@ -20,7 +20,7 @@ layout(set = 0, binding = 0) uniform GlobalUniform {
   float screenHeight;
 } globalUniform;
 
-layout(std140, set = 0, binding = 1) readonly buffer ObjectBuffer {
+layout(std140, set = 0, binding = 1) /* readonly */ buffer ObjectBuffer {
 	Object objects[];
 } objectBuffer;
 

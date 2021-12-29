@@ -38,5 +38,16 @@ void main() {
     Object object = objectBuffer.objects[gID];
     Mesh mesh = meshesBuffer.meshes[object.mesh];
 
-    indirectBuffer.commands[object.batch].indexCount = mesh.indexCount;
+    uint batch = object.batch;
+    bool visible = true;
+    if (visible) {
+        indirectBuffer.commands[batch].indexCount = mesh.indexCount;
+        uint objectSlot = atomicAdd(indirectBuffer.commands[batch].instanceCount, 1);
+        indirectBuffer.commands[batch].firstIndex = mesh.firstIndex;
+        indirectBuffer.commands[batch].vertexOffset = mesh.vertexOffset;
+        indirectBuffer.commands[batch].firstInstance = objectBuffer.objects[batch].firstInstance;
+        indirectBuffer.commands[batch].batchCount = 1;
+
+        objectBuffer.objects[objectBuffer.objects[batch].firstInstance +  objectSlot].redirect = gID;
+    }
 }

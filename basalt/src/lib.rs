@@ -115,6 +115,7 @@ pub struct PipelineCreationParams<'a> {
     pub global_set_layout: &'a Arc<DescriptorSetLayout>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct InstancingBatch<'a> {
     pipeline: &'a Pipeline,
@@ -126,6 +127,16 @@ struct InstancingBatch<'a> {
     renderables: Vec<&'a Renderable>,
     custom_set: Option<&'a DescriptorSet>,
     mesh: u32,
+    first_instance: u32,
+}
+
+#[derive(Debug)]
+struct IndirectDraw<'a> {
+    pipeline: &'a Pipeline,
+    index_vertex_buffer: &'a buffer::Allocated,
+    custom_set: Option<&'a DescriptorSet>,
+    instancing_batches: &'a [InstancingBatch<'a>],
+    first_batch: u32,
 }
 
 struct BatchingResult<'a> {
@@ -360,24 +371,9 @@ impl Renderer {
             ],
             None,
         );
-        let buffer_info = vk::BufferCreateInfoBuilder::new()
-            .size(std::mem::size_of::<shaders::IndirectDrawCommand>() as u64 * 2)
-            .usage(
-                vk::BufferUsageFlags::INDIRECT_BUFFER
-                    | vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_DST,
-            );
 
         let indirect_buffers = (0..frames_in_flight)
-            .map(|_| {
-                Arc::new(buffer::Allocated::new(
-                    allocator.clone(),
-                    *buffer_info,
-                    vk_mem_erupt::MemoryUsage::CpuToGpu,
-                    Default::default(),
-                    label!("IndirectBuffer"),
-                ))
-            })
+            .map(|_| Arc::new(create_indirect_buffer(allocator.clone(), 2)))
             .collect();
         let cull_sets = mesh_buffers
             .iter()
@@ -784,7 +780,7 @@ impl Renderer {
         let mut batches: Vec<InstancingBatch> = Vec::new();
         let mut meshes: Vec<Arc<Mesh>> = Vec::new();
         let mut custom_descriptor_sets: Vec<Option<Arc<DescriptorSet>>> = Vec::new();
-        for renderable in renderables {
+        for (i, renderable) in renderables.into_iter().enumerate() {
             let this_mesh = &*renderable.mesh as *const Mesh;
             let this_pipeline = Some(renderable.pipeline);
             let this_custom_set = renderable
@@ -821,6 +817,7 @@ impl Renderer {
                 vertex_start: renderable.mesh.vertex_start,
                 mesh: TryInto::<u32>::try_into(meshes.len()).unwrap() - 1,
                 renderables: Vec::from([renderable]),
+                first_instance: i as u32,
             });
         }
         BatchingResult {
@@ -829,21 +826,53 @@ impl Renderer {
             sets: custom_descriptor_sets,
         }
     }
+    fn batch_batches<'a>(batches: &'a [InstancingBatch<'a>]) -> Vec<IndirectDraw<'a>> {
+        let mut draws = Vec::new();
+        let mut last_index_vertex_buffer: *const buffer::Allocated = std::ptr::null();
+        let mut last_custom_set: *const DescriptorSet = std::ptr::null();
+        let mut last_pipeline: *const Pipeline = std::ptr::null();
+        for (i, batch) in batches.iter().enumerate() {
+            let this_custom_set: *const DescriptorSet = batch
+                .custom_set
+                .map(|c| c as *const DescriptorSet)
+                .unwrap_or_else(std::ptr::null);
+            if last_index_vertex_buffer != batch.index_vertex_buffer
+                || this_custom_set != last_custom_set
+                || last_pipeline != batch.pipeline
+            {
+                draws.push(IndirectDraw {
+                    pipeline: batch.pipeline,
+                    index_vertex_buffer: batch.index_vertex_buffer,
+                    custom_set: batch.custom_set,
+                    first_batch: i as u32,
+                    instancing_batches: &batches[i..i + 1],
+                })
+            } else {
+                let last = draws.last_mut().unwrap();
+                last.instancing_batches = &batches[last.first_batch as usize..i + 1];
+            }
+            last_index_vertex_buffer = batch.index_vertex_buffer;
+            last_custom_set = this_custom_set;
+            last_pipeline = batch.pipeline;
+        }
+        draws
+    }
     fn write_renderables(buffer: &buffer::Allocated, instancing_batches: &[InstancingBatch]) {
         let ptr = buffer.map().cast::<shaders::Object>() as *mut shaders::Object;
         let num_renderables = instancing_batches.iter().map(|b| b.renderables.len()).sum();
         let slice = unsafe { std::slice::from_raw_parts_mut(ptr, num_renderables) };
         let mut i = 0;
         for (batch_id, batch) in instancing_batches.iter().enumerate() {
+            slice[batch_id].first_instance = batch.first_instance;
             for renderable in &batch.renderables {
-                slice[i as usize].redirect = i;
-                slice[i as usize].transform = renderable.transform;
-                slice[i as usize].batch = batch_id.try_into().unwrap();
-                slice[i as usize].draw = batch_id.try_into().unwrap();
-                slice[i as usize].uncullable = if renderable.uncullable { 1 } else { 0 };
-                slice[i as usize].unused_3 = 0;
-                slice[i as usize].custom_set = renderable.custom_id;
-                slice[i as usize].mesh = batch.mesh;
+                //slice[i].redirect = i as u32;
+                slice[i].transform = renderable.transform;
+                slice[i].batch = batch_id.try_into().unwrap();
+                slice[i].draw = batch_id.try_into().unwrap();
+                slice[i].uncullable = if renderable.uncullable { 1 } else { 0 };
+                slice[i].unused_3 = 0;
+                slice[i].custom_set = renderable.custom_id;
+                slice[i].mesh = batch.mesh;
                 i += 1;
             }
         }
@@ -1068,36 +1097,35 @@ impl Renderer {
         &self,
         frame_index: usize,
         global_uniform_offset: u32,
-        instancing_batches: &[InstancingBatch],
+        indirect_draws: &[IndirectDraw],
         cmd: vk::CommandBuffer,
     ) {
         let frame = self.frames.get(frame_index);
-        let mut first_instance = 0;
         unsafe {
-            for batch in instancing_batches {
+            for draw in indirect_draws {
                 self.device.cmd_bind_vertex_buffers(
                     cmd,
                     0,
-                    &[**batch.index_vertex_buffer, **frame.renderables_buffer],
+                    &[**draw.index_vertex_buffer, **frame.renderables_buffer],
                     &[0, 0],
                 );
                 self.device.cmd_bind_index_buffer(
                     cmd,
-                    **batch.index_vertex_buffer,
+                    **draw.index_vertex_buffer,
                     0,
                     vk::IndexType::UINT32,
                 );
                 self.device.cmd_bind_pipeline(
                     cmd,
                     vk::PipelineBindPoint::GRAPHICS,
-                    **batch.pipeline,
+                    **draw.pipeline,
                 );
 
-                if let Some(custom_set) = batch.custom_set {
+                if let Some(custom_set) = draw.custom_set {
                     self.device.cmd_bind_descriptor_sets(
                         cmd,
                         vk::PipelineBindPoint::GRAPHICS,
-                        **batch.pipeline.layout(),
+                        **draw.pipeline.layout(),
                         0,
                         &[**frame.descriptor_set, **custom_set],
                         &[global_uniform_offset],
@@ -1106,21 +1134,21 @@ impl Renderer {
                     self.device.cmd_bind_descriptor_sets(
                         cmd,
                         vk::PipelineBindPoint::GRAPHICS,
-                        **batch.pipeline.layout(),
+                        **draw.pipeline.layout(),
                         0,
                         &[**frame.descriptor_set],
                         &[global_uniform_offset],
                     );
                 };
-                self.device.cmd_draw_indexed(
+                let stride = std::mem::size_of::<shaders::IndirectDrawCommand>() as u32;
+                let offset = draw.first_batch as u64 * stride as u64;
+                self.device.cmd_draw_indexed_indirect(
                     cmd,
-                    batch.index_count,
-                    batch.instance_count,
-                    batch.index_start,
-                    batch.vertex_start.try_into().unwrap(),
-                    first_instance,
+                    ***frame.indirect_buffer,
+                    offset,
+                    draw.instancing_batches.len() as u32,
+                    stride,
                 );
-                first_instance += batch.instance_count;
             }
             self.device.cmd_end_render_pass(cmd);
             self.device.end_command_buffer(cmd).unwrap();
@@ -1214,7 +1242,8 @@ impl Renderer {
         self.begin_command_buffer(&frame);
         self.record_cull_dispatch(&frame, &batches, renderables.len(), global_uniform_offset);
         let cmd = self.begin_render_pass(&frame, swapchain_image_index, [0.15, 0.6, 0.9, 1.0]);
-        self.record_draws(frame_index, global_uniform_offset, &batches, cmd);
+        let indirect_draws = Self::batch_batches(&batches);
+        self.record_draws(frame_index, global_uniform_offset, &indirect_draws, cmd);
         self.submit_cmd(frame_index, cmd);
         self.present(frame_index, swapchain_image_index);
         let cpu_work_time = cpu_work_start.elapsed();

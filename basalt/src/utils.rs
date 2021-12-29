@@ -807,7 +807,7 @@ pub fn create_indirect_buffer(allocator: Arc<Allocator>, size: usize) -> buffer:
     buffer::Allocated::new(
         allocator,
         *buffer_info,
-        vk_mem_erupt::MemoryUsage::CpuToGpu,
+        vk_mem_erupt::MemoryUsage::GpuOnly,
         Default::default(),
         label!("IndirectBuffer"),
     )
@@ -820,7 +820,6 @@ pub fn create_cull_set(
     mesh_buffer: Arc<buffer::Allocated>,
     indirect_buffer: Arc<buffer::Allocated>,
 ) -> DescriptorSet {
-    dbg!(&layout);
     let mut set = descriptor_set_manager.allocate(layout, None);
     let buffer_info = vk::DescriptorBufferInfoBuilder::new()
         .buffer(**mesh_buffer)
