@@ -15,6 +15,10 @@ macro_rules! label {
         concat!(file!(), ":", line!())
     };
 }
+use cgmath::Matrix4;
+use cgmath::SquareMatrix;
+use cgmath::Vector3;
+use cgmath::Vector4;
 pub use descriptor_sets::DescriptorSetLayout;
 pub use descriptor_sets::DescriptorSetLayoutBinding;
 pub use descriptor_sets::DescriptorSetManager;
@@ -44,6 +48,7 @@ pub use utils::RasterizationState;
 pub use vk_mem_erupt;
 pub mod buffer;
 pub mod image;
+pub use mesh::LoadingVertex;
 
 mod descriptor_sets;
 mod frame;
@@ -153,6 +158,18 @@ pub struct TransferContext {
     pub transfer_family: QueueFamily,
     pub command_pool: Mutex<CommandPool>,
     pub fence: Mutex<Fence>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Frustum {
+    pub top: Vector3<f32>,
+    pub bottom: Vector3<f32>,
+    pub right: Vector3<f32>,
+    pub left: Vector3<f32>,
+    pub far: Vector3<f32>,
+    pub near: Vector3<f32>,
+    pub far_distance: f32,
+    pub near_distance: f32,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -288,7 +305,7 @@ impl Renderer {
             heap_size_limits: None,
         };
 
-        let allocator = Arc::new(Allocator::new(&allocator_info));
+        let allocator = Arc::new(Allocator::new(device.clone(), &allocator_info));
         let depth_images = create_depth_images(&allocator, width, height, frames_in_flight);
         let depth_image_views = create_depth_image_views(&device, &depth_images);
         let frame_buffers = create_framebuffers(
@@ -316,6 +333,15 @@ impl Renderer {
             renderables_count: 0,
             screen_width: width as f32,
             screen_height: height as f32,
+            frustum_top_normal: Vector4::new(0.0, 0.0, 0.0, 0.0),
+            frustum_bottom_normal: Vector4::new(0.0, 0.0, 0.0, 0.0),
+            frustum_right_normal: Vector4::new(0.0, 0.0, 0.0, 0.0),
+            frustum_left_normal: Vector4::new(0.0, 0.0, 0.0, 0.0),
+            frustum_far_normal: Vector4::new(0.0, 0.0, 0.0, 0.0),
+            frustum_near_normal: Vector4::new(0.0, 0.0, 0.0, 0.0),
+            camera_transform: Matrix4::identity(),
+            near: 0.0,
+            far: 0.0,
         };
         let max_objects = (0..frames_in_flight).map(|_| 4).collect::<Vec<_>>();
         let renderables_buffers = max_objects
@@ -741,11 +767,14 @@ impl Renderer {
             material.0 = new_material;
         }
     }
+    #[rustfmt::skip]
     fn update_global_uniform(
         &mut self,
         frame_index: usize,
         view_proj: cgmath::Matrix4<f32>,
+        frustum: Frustum,
         renderables: u32,
+        camera_transform: Matrix4<f32>
     ) -> u32 {
         self.global_uniform.view_proj =
             cgmath::Matrix4::from_nonuniform_scale(1.0, -1.0, 1.0) * view_proj;
@@ -753,6 +782,16 @@ impl Renderer {
         self.global_uniform.screen_width = self.width as f32;
         self.global_uniform.screen_height = self.height as f32;
         self.global_uniform.renderables_count = renderables;
+        self.global_uniform.frustum_top_normal = frustum.top.extend(42.69);
+        self.global_uniform.frustum_bottom_normal = frustum.bottom.extend(42.69);
+        self.global_uniform.frustum_right_normal = frustum.right.extend(42.69);
+        self.global_uniform.frustum_left_normal = frustum.left.extend(42.69);
+        self.global_uniform.frustum_far_normal = frustum.far.extend(42.69);
+        self.global_uniform.frustum_near_normal = frustum.near.extend(42.69);
+        self.global_uniform.camera_transform = camera_transform;
+        self.global_uniform.near = frustum.near_distance;
+        self.global_uniform.far = frustum.far_distance;
+
         let ptr = self.uniform_buffer.map();
         let global_uniform_offset: u32 = (pad_uniform_buffer_size(
             &self.physical_device_properties.limits,
@@ -807,6 +846,15 @@ impl Renderer {
             last_custom_set = this_custom_set;
 
             let pipeline = &materials.get(renderable.pipeline).unwrap().0;
+            if pipeline.vertex_type() != renderable.mesh.vertex_type() {
+                panic!(
+                    "Different vertex types! Pipeline ({}): {:?}, mesh({}): {:?}",
+                    pipeline.name(),
+                    pipeline.vertex_name(),
+                    renderable.mesh.name(),
+                    renderable.mesh.vertex_name()
+                );
+            }
             batches.push(InstancingBatch {
                 custom_set: renderable.custom_set.as_deref(),
                 index_count: renderable.mesh.index_count,
@@ -883,14 +931,10 @@ impl Renderer {
         let slice = unsafe { std::slice::from_raw_parts_mut(ptr, meshes.len()) };
         for (i, mesh) in meshes.iter().enumerate() {
             slice[i] = shaders::Mesh {
-                bounds_max: mesh.bounds.max,
+                sphere_bounds: mesh.bounds.sphere_bounds,
                 first_index: mesh.index_start,
-                bounds_min: mesh.bounds.min,
                 index_count: mesh.index_count,
                 vertex_offset: mesh.vertex_start.try_into().unwrap(),
-                padding_0: Default::default(),
-                padding_1: Default::default(),
-                padding_2: Default::default(),
             };
         }
         buffer.unmap();
@@ -1191,7 +1235,9 @@ impl Renderer {
     pub fn render(
         &mut self,
         renderables: &[Renderable],
-        view_proj: cgmath::Matrix4<f32>,
+        view_proj: Matrix4<f32>,
+        frustum: Frustum,
+        camera_transform: Matrix4<f32>,
     ) -> Option<(std::time::Duration, std::time::Duration)> {
         self.frame_number += 1;
         if self.resize(self.width, self.height, self.frames_in_flight, self.vsync) {
@@ -1208,7 +1254,9 @@ impl Renderer {
         let global_uniform_offset = self.update_global_uniform(
             frame_index,
             view_proj,
+            frustum,
             renderables.len().try_into().unwrap(),
+            camera_transform,
         );
         self.resize_mesh_buffer_if_necessary(renderables, frame_index);
         self.resize_renderable_buffer_if_necessary(frame_index, renderables.len());

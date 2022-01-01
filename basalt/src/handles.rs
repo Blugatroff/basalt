@@ -2,11 +2,12 @@ use crate::{
     mesh::VertexInfoDescription,
     utils::{log_resource_created, log_resource_dropped, ColorBlendAttachment, DepthStencilInfo},
     utils::{InputAssemblyState, MultiSamplingState, RasterizationState},
+    Vertex,
 };
 use erupt::{cstr, vk};
-use std::{ffi::CString, io::Read, marker::PhantomData, sync::Arc};
+use std::{any::TypeId, ffi::CString, io::Read, marker::PhantomData, sync::Arc};
 
-pub struct Allocator(vk_mem_erupt::Allocator);
+pub struct Allocator(vk_mem_erupt::Allocator, Arc<Device>);
 
 impl std::fmt::Debug for Allocator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -15,9 +16,9 @@ impl std::fmt::Debug for Allocator {
 }
 
 impl Allocator {
-    pub fn new(info: &vk_mem_erupt::AllocatorCreateInfo) -> Self {
+    pub fn new(device: Arc<Device>, info: &vk_mem_erupt::AllocatorCreateInfo) -> Self {
         log_resource_created("Allocator", "");
-        Self(vk_mem_erupt::Allocator::new(info).unwrap())
+        Self(vk_mem_erupt::Allocator::new(info).unwrap(), device)
     }
 }
 
@@ -209,7 +210,6 @@ pub struct PipelineDesc<'a> {
     pub scissor: vk::Rect2DBuilder<'a>,
     pub color_blend_attachment: ColorBlendAttachment,
     pub shader_stages: &'a [&'a ShaderModule],
-    pub vertex_description: VertexInfoDescription,
     pub input_assembly_state: InputAssemblyState,
     pub rasterization_state: RasterizationState,
     pub multisample_state: MultiSamplingState,
@@ -282,16 +282,23 @@ pub struct Pipeline {
     device: Arc<Device>,
     name: String,
     layout: Arc<PipelineLayout>,
+    vertex_type: std::any::TypeId,
+    vertex_name: &'static str,
 }
 
 impl Pipeline {
-    pub fn new(
+    pub fn new<V: Vertex + 'static>(
         device: Arc<Device>,
         pass: vk::RenderPass,
         desc: &PipelineDesc,
-        name: impl Into<String>,
+        name: &dyn ToString,
     ) -> Self {
-        fn new(device: &Device, pass: vk::RenderPass, desc: &PipelineDesc) -> vk::Pipeline {
+        fn new(
+            device: &Device,
+            pass: vk::RenderPass,
+            desc: &PipelineDesc,
+            vertex_description: VertexInfoDescription,
+        ) -> vk::Pipeline {
             let viewports = &[desc.view_port.into_builder()];
             let scissors = &[desc.scissor];
             let viewport_state = vk::PipelineViewportStateCreateInfoBuilder::new()
@@ -307,7 +314,7 @@ impl Pipeline {
             >::into(desc.depth_stencil);
             let multi_sample_state = desc.multisample_state.builder();
             let rasterization_state = desc.rasterization_state.builder();
-            let vertex_info = desc.vertex_description.builder();
+            let vertex_info = vertex_description.builder();
             let input_assembly_state = desc.input_assembly_state.builder();
             let shader_stages = desc
                 .shader_stages
@@ -330,13 +337,18 @@ impl Pipeline {
 
             unsafe { device.create_graphics_pipelines(None, &[pipeline_info], None) }.unwrap()[0]
         }
-        let name = name.into();
+        let vertex_description = V::description();
+        let name = name.to_string();
+        let vertex_type = std::any::TypeId::of::<V>();
+        let vertex_name = std::any::type_name::<V>();
         log_resource_created("Pipeline", &name);
         Self {
             layout: Arc::clone(&desc.layout),
-            pipeline: new(&device, pass, desc),
+            pipeline: new(&device, pass, desc, vertex_description),
             device,
             name,
+            vertex_type,
+            vertex_name,
         }
     }
     pub fn layout(&self) -> &PipelineLayout {
@@ -344,6 +356,12 @@ impl Pipeline {
     }
     pub fn name(&self) -> &str {
         &self.name
+    }
+    pub const fn vertex_type(&self) -> TypeId {
+        self.vertex_type
+    }
+    pub const fn vertex_name(&self) -> &'static str {
+        self.vertex_name
     }
 }
 

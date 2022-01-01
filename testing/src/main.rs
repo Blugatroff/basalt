@@ -1,10 +1,11 @@
 mod input;
 use basalt::{
     image, label, vk, ColorBlendAttachment, DefaultVertex, DepthStencilInfo, DescriptorSetLayout,
-    Device, InputAssemblyState, MaterialLoadFn, Mesh, MultiSamplingState, Pipeline, PipelineDesc,
-    PipelineLayout, RasterizationState, Renderable, Renderer, ShaderModule, Vertex,
+    Device, Frustum, InputAssemblyState, MaterialLoadFn, Mesh, MultiSamplingState, Pipeline,
+    PipelineDesc, PipelineLayout, RasterizationState, Renderable, Renderer, ShaderModule, Vertex,
+    VertexInfoDescription,
 };
-use cgmath::SquareMatrix;
+use cgmath::{InnerSpace, Matrix4, SquareMatrix, Vector3, Vector4};
 use first_person_camera::FirstPersonCamera;
 use gui::EruptEgui;
 use input::Input;
@@ -28,6 +29,272 @@ pub fn create_window() -> (sdl2::Sdl, sdl2::video::Window, sdl2::EventPump) {
     (sdl, window, event_pump)
 }
 
+fn create_frustum(fov: f32, far: f32, aspect: f32, near: f32) -> Frustum {
+    let hfar = 2.0 * (fov / 2.0).tan() * far;
+    let wfar = hfar * aspect;
+
+    let top_plane_normal = cgmath::Vector3::new(0.0, (fov / 2.0).tan(), 1.0)
+        .cross(cgmath::Vector3::new(-1.0, 0.0, 0.0));
+    let bottom_plane_normal =
+        cgmath::Vector3::new(top_plane_normal.x, -top_plane_normal.y, top_plane_normal.z);
+    let near_plane_normal = cgmath::Vector3::new(0.0, 0.0, 1.0);
+    let left_plane_normal = cgmath::Vector3::new(wfar / 2.0, 0.0, far)
+        .cross(cgmath::Vector3::new(0.0, 1.0, 0.0))
+        .normalize();
+    let right_plane_normal = cgmath::Vector3::new(
+        -left_plane_normal.x,
+        left_plane_normal.y,
+        left_plane_normal.z,
+    );
+    let far_plane_normal = cgmath::Vector3::new(0.0, 0.0, -1.0);
+
+    Frustum {
+        top: top_plane_normal.normalize(),
+        bottom: bottom_plane_normal.normalize(),
+        right: right_plane_normal.normalize(),
+        left: left_plane_normal.normalize(),
+        far: far_plane_normal.normalize(),
+        near: near_plane_normal.normalize(),
+        near_distance: near,
+        far_distance: far,
+    }
+}
+
+fn create_frustum_model(
+    renderer: &Renderer,
+    far: f32,
+    fov: f32,
+    aspect: f32,
+    near: f32,
+    rgb_pipeline: usize,
+    line_pipeline: usize,
+) -> Vec<Renderable> {
+    let hfar = 2.0 * (fov / 2.0).tan() * far;
+    let wfar = hfar * aspect;
+    let hnear = 2.0 * (fov / 2.0).tan() * near;
+    let wnear = hnear * aspect;
+    let mut far_plane = {
+        let vertices = vec![
+            ColorVertex {
+                position: cgmath::Vector3::new(-wfar / 2.0, -hfar / 2.0, far),
+                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
+                color: [0x0, 0xFF, 0x0],
+            },
+            ColorVertex {
+                position: cgmath::Vector3::new(wfar / 2.0, hfar / 2.0, far),
+                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
+                color: [0x0, 0xFF, 0x0],
+            },
+            ColorVertex {
+                position: cgmath::Vector3::new(-wfar / 2.0, hfar / 2.0, far),
+                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
+                color: [0x0, 0xFF, 0x0],
+            },
+            ColorVertex {
+                position: cgmath::Vector3::new(wfar / 2.0, -hfar / 2.0, far),
+                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
+                color: [0x0, 0xFF, 0x0],
+            },
+        ];
+        let indices = vec![0, 1, 2, 3, 1, 0, 1, 0, 2, 1, 3, 0];
+        Mesh::new(
+            &vertices,
+            &indices,
+            renderer.allocator().clone(),
+            renderer.transfer_context(),
+            renderer.device(),
+            true,
+            String::from("Frustum Far Plane"),
+        )
+    };
+    let mut near_plane = {
+        let vertices = vec![
+            ColorVertex {
+                position: cgmath::Vector3::new(-wnear / 2.0, -hnear / 2.0, near),
+                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
+                color: [0x0, 0xFF, 0xFF],
+            },
+            ColorVertex {
+                position: cgmath::Vector3::new(wnear / 2.0, hnear / 2.0, near),
+                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
+                color: [0x0, 0xFF, 0xFF],
+            },
+            ColorVertex {
+                position: cgmath::Vector3::new(-wnear / 2.0, hnear / 2.0, near),
+                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
+                color: [0x0, 0xFF, 0xFF],
+            },
+            ColorVertex {
+                position: cgmath::Vector3::new(wnear / 2.0, -hnear / 2.0, near),
+                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
+                color: [0x0, 0xFF, 0xFF],
+            },
+        ];
+        let indices = vec![0, 1, 2, 3, 1, 0, 1, 0, 2, 1, 3, 0];
+        Mesh::new(
+            &vertices,
+            &indices,
+            renderer.allocator().clone(),
+            renderer.transfer_context(),
+            renderer.device(),
+            true,
+            String::from("Frustum Near Plane"),
+        )
+    };
+    let mut lines = {
+        let top_plane_normal = cgmath::Vector3::new(0.0, (fov / 2.0).tan(), 1.0)
+            .cross(cgmath::Vector3::new(-1.0, 0.0, 0.0));
+        let top_plane_line_start = cgmath::Vector3::new(0.0, hfar / 4.0, far / 2.0);
+        let top_plane_line_end = top_plane_line_start + top_plane_normal;
+        let bottom_plane_normal =
+            cgmath::Vector3::new(top_plane_normal.x, -top_plane_normal.y, top_plane_normal.z);
+        let bottom_plane_line_start = cgmath::Vector3::new(0.0, -hfar / 4.0, far / 2.0);
+        let bottom_plane_line_end = bottom_plane_line_start + bottom_plane_normal;
+        let near_plane_normal = cgmath::Vector3::new(0.0, 0.0, 1.0);
+        let near_plane_line_start = cgmath::Vector3::new(0.0, 0.0, near);
+        let near_plane_line_end = near_plane_line_start + near_plane_normal;
+        let left_plane_normal = cgmath::Vector3::new(wfar / 2.0, 0.0, far)
+            .cross(cgmath::Vector3::new(0.0, 1.0, 0.0))
+            .normalize();
+        let left_plane_line_start = cgmath::Vector3::new(wfar / 4.0, 0.0, far / 2.0);
+        let left_plane_line_end = left_plane_line_start + left_plane_normal;
+        let right_plane_normal = cgmath::Vector3::new(
+            -left_plane_normal.x,
+            left_plane_normal.y,
+            left_plane_normal.z,
+        );
+        let right_plane_line_start = cgmath::Vector3::new(-wfar / 4.0, 0.0, far / 2.0);
+        let right_plane_line_end = right_plane_line_start + right_plane_normal;
+        let far_plane_normal = cgmath::Vector3::new(0.0, 0.0, -1.0);
+        let far_plane_line_start = cgmath::Vector3::new(0.0, 0.0, far);
+        let far_plane_line_end = far_plane_line_start + far_plane_normal;
+        let vertices = vec![
+            LineVertex {
+                position: cgmath::Vector3::new(0.0, 0.0, 0.0),
+                color: [0xFF, 0, 0],
+            },
+            LineVertex {
+                position: cgmath::Vector3::new(-wfar / 2.0, -hfar / 2.0, far),
+                color: [0xFF, 0, 0],
+            },
+            LineVertex {
+                position: cgmath::Vector3::new(0.0, 0.0, 0.0),
+                color: [0xFF, 0, 0],
+            },
+            LineVertex {
+                position: cgmath::Vector3::new(wfar / 2.0, hfar / 2.0, far),
+                color: [0xFF, 0, 0],
+            },
+            LineVertex {
+                position: cgmath::Vector3::new(0.0, 0.0, 0.0),
+                color: [0xFF, 0, 0],
+            },
+            LineVertex {
+                position: cgmath::Vector3::new(-wfar / 2.0, hfar / 2.0, far),
+                color: [0xFF, 0, 0],
+            },
+            LineVertex {
+                position: cgmath::Vector3::new(0.0, 0.0, 0.0),
+                color: [0xFF, 0, 0],
+            },
+            LineVertex {
+                position: cgmath::Vector3::new(wfar / 2.0, -hfar / 2.0, far),
+                color: [0xFF, 0, 0],
+            },
+            LineVertex {
+                position: top_plane_line_start,
+                color: [0x0, 0, 0],
+            },
+            LineVertex {
+                position: top_plane_line_end,
+                color: [0x0, 0, 0],
+            },
+            LineVertex {
+                position: bottom_plane_line_start,
+                color: [0x0, 0, 0],
+            },
+            LineVertex {
+                position: bottom_plane_line_end,
+                color: [0x0, 0, 0],
+            },
+            LineVertex {
+                position: near_plane_line_start,
+                color: [0x0, 0, 0],
+            },
+            LineVertex {
+                position: near_plane_line_end,
+                color: [0x0, 0, 0],
+            },
+            LineVertex {
+                position: left_plane_line_start,
+                color: [0x0, 0, 0],
+            },
+            LineVertex {
+                position: left_plane_line_end,
+                color: [0x0, 0, 0],
+            },
+            LineVertex {
+                position: right_plane_line_start,
+                color: [0x0, 0, 0],
+            },
+            LineVertex {
+                position: right_plane_line_end,
+                color: [0x0, 0, 0],
+            },
+            LineVertex {
+                position: far_plane_line_start,
+                color: [0x0, 0, 0],
+            },
+            LineVertex {
+                position: far_plane_line_end,
+                color: [0x0, 0, 0],
+            },
+        ];
+        assert!(vertices.len() % 2 == 0);
+        let indices = (0..vertices.len() as u32).collect::<Vec<u32>>();
+        Mesh::new(
+            &vertices,
+            &indices,
+            renderer.allocator().clone(),
+            renderer.transfer_context(),
+            renderer.device(),
+            true,
+            String::from("Frustum Lines"),
+        )
+    };
+    Mesh::combine_meshes(
+        [&mut far_plane, &mut near_plane, &mut lines],
+        renderer.allocator().clone(),
+        renderer.transfer_context(),
+        renderer.device(),
+    );
+    let far_plane = Renderable {
+        mesh: Arc::new(far_plane),
+        pipeline: rgb_pipeline,
+        transform: cgmath::Matrix4::identity(),
+        custom_set: None,
+        custom_id: 0,
+        uncullable: false,
+    };
+    let near_plane = Renderable {
+        mesh: Arc::new(near_plane),
+        pipeline: rgb_pipeline,
+        transform: cgmath::Matrix4::identity(),
+        custom_set: None,
+        custom_id: 0,
+        uncullable: false,
+    };
+    let lines = Renderable {
+        mesh: Arc::new(lines),
+        pipeline: line_pipeline,
+        transform: cgmath::Matrix4::identity(),
+        custom_set: None,
+        custom_id: 0,
+        uncullable: false,
+    };
+    vec![far_plane, near_plane, lines]
+}
+
 struct State {
     frames_in_flight: usize,
     vsync: bool,
@@ -46,6 +313,8 @@ struct State {
     renderer: Renderer,
     egui_enabled: bool,
     tx: std::sync::mpsc::Sender<()>,
+    frustum_renderables: Vec<Renderable>,
+    frustum_transform: Matrix4<f32>,
 }
 
 impl State {
@@ -70,7 +339,7 @@ impl State {
             DefaultVertex {
                 position: cgmath::Vector3::new(1.0, 1.0, 0.0),
                 normal: cgmath::Vector3::new(0.0, 0.0, 0.0),
-                uv: cgmath::Vector2::new(1.0, 1.0),
+                uv: cgmath::Vector2::new(1.0, 0.0),
             },
             DefaultVertex {
                 position: cgmath::Vector3::new(-1.0, 1.0, 0.0),
@@ -80,7 +349,7 @@ impl State {
             DefaultVertex {
                 position: cgmath::Vector3::new(0.0, -1.0, 0.0),
                 normal: cgmath::Vector3::new(0.0, 0.0, 0.0),
-                uv: cgmath::Vector2::new(0.5, 0.0),
+                uv: cgmath::Vector2::new(1.0, 1.0),
             },
         ];
         let threads = std::env::args()
@@ -116,9 +385,9 @@ impl State {
                                     break;
                                 }
                                 std::thread::sleep(std::time::Duration::from_millis(100));
-                                let mesh = Mesh::load(
+                                let mesh = Mesh::load::<ColorVertex>(
                                     allocator.clone(),
-                                    "./assets/suzanne.obj",
+                                    "./assets/suzanne.obj".into(),
                                     &transfer_context,
                                     &device,
                                 )
@@ -150,6 +419,7 @@ impl State {
         }
         let rgb_pipeline = renderer.register_pipeline(rgb_pipeline(renderer.device()));
         let mesh_pipeline = renderer.register_pipeline(mesh_pipeline(renderer.device()));
+        let line_pipeline = renderer.register_pipeline(line_pipeline(renderer.device()));
         let mut triangle_mesh = Mesh::new(
             &vertices,
             &[0, 1, 2, 2, 1, 0],
@@ -157,10 +427,11 @@ impl State {
             renderer.transfer_context(),
             renderer.device(),
             true,
+            String::from("TriangleMesh"),
         );
-        let mut suzanne_mesh = Mesh::load(
+        let mut suzanne_mesh = Mesh::load::<ColorVertex>(
             renderer.allocator().clone(),
-            "./assets/suzanne.obj",
+            "./assets/suzanne.obj".into(),
             renderer.transfer_context(),
             renderer.device(),
         )
@@ -198,16 +469,18 @@ impl State {
             for y in -s..s {
                 for z in -s..s {
                     suzanne.transform = cgmath::Matrix4::from_translation(cgmath::Vector3::new(
-                        x as f32, y as f32, z as f32,
-                    ));
+                        x as f32,
+                        y as f32 - 15.0,
+                        z as f32,
+                    )) * cgmath::Matrix4::from_scale(1.5);
                     renderables.push(suzanne.clone());
                 }
             }
         }
 
-        let empire_meshes = Mesh::load(
+        let empire_meshes = Mesh::load::<DefaultVertex>(
             renderer.allocator().clone(),
-            "./assets/lost_empire.obj",
+            "./assets/lost_empire.obj".into(),
             renderer.transfer_context(),
             renderer.device(),
         )
@@ -243,6 +516,19 @@ impl State {
                 cgmath::Matrix4::from_translation(cgmath::Vector3::new(0.0, 0.0, 0.0));
             renderables.push(empire);
         }
+        let fov = 50.0 * std::f32::consts::PI / 180.0;
+        let near = 1.0;
+        let far = 20.0;
+        let aspect = 1.0;
+        let frustum_renderables = create_frustum_model(
+            &renderer,
+            far,
+            fov,
+            aspect,
+            near,
+            rgb_pipeline,
+            line_pipeline,
+        );
         let last_time = std::time::Instant::now();
         let input = Input::default();
         let camera = FirstPersonCamera::new(
@@ -256,6 +542,7 @@ impl State {
         let vsync = true;
         let egui_enabled = false;
         let start = std::time::Instant::now();
+        let frustum_transform = cgmath::Matrix4::<f32>::identity();
         Self {
             start,
             vsync,
@@ -274,6 +561,8 @@ impl State {
             event_pump,
             egui_enabled,
             tx,
+            frustum_renderables,
+            frustum_transform,
         }
     }
     fn ui(&mut self) {
@@ -290,9 +579,13 @@ impl State {
                     ui.label(format!("{}fps", 1.0 / dt));
                     ui.checkbox(&mut self.vsync, "Vsync");
                     ui.add(egui::Slider::new(&mut self.frames_in_flight, 1..=15));
-                    ui.add({
-                        egui::plot::Plot::new(0)
-                            .line(
+
+                    egui::plot::Plot::new(0)
+                        .legend(egui::plot::Legend::default())
+                        .allow_drag(false)
+                        .allow_zoom(false)
+                        .show(ui, |plot| {
+                            plot.line(
                                 egui::plot::Line::new(egui::plot::Values::from_values_iter(
                                     self.last_frame_times.iter().map(|(t, v, _, _)| {
                                         egui::plot::Value::new(*t, *v * 1000.0)
@@ -300,8 +593,8 @@ impl State {
                                 ))
                                 .color(egui::Color32::BLUE)
                                 .name("Frametime"),
-                            )
-                            .line(
+                            );
+                            plot.line(
                                 egui::plot::Line::new(egui::plot::Values::from_values_iter(
                                     self.last_frame_times.iter().map(|(t, _, v, _)| {
                                         egui::plot::Value::new(*t, *v * 1000.0)
@@ -309,8 +602,8 @@ impl State {
                                 ))
                                 .color(egui::Color32::RED)
                                 .name("GPU-Wait"),
-                            )
-                            .line(
+                            );
+                            plot.line(
                                 egui::plot::Line::new(egui::plot::Values::from_values_iter(
                                     self.last_frame_times.iter().map(|(t, _, _, v)| {
                                         egui::plot::Value::new(*t, *v * 1000.0)
@@ -318,11 +611,9 @@ impl State {
                                 ))
                                 .color(egui::Color32::GREEN)
                                 .name("Prerender Processing"),
-                            )
-                            .legend(egui::plot::Legend::default())
-                            .allow_drag(false)
-                            .allow_zoom(false)
-                    })
+                            );
+                        })
+                        .response;
                 });
             });
     }
@@ -349,19 +640,22 @@ impl State {
         self.camera.update(&self.input.make_controls(dt));
         let (width, height) = window.size();
         let aspect = width as f32 / height as f32;
-        let view_proj = self.camera.create_view_projection_matrix(
-            aspect,
-            90.0 * std::f32::consts::PI / 180.0,
-            0.1,
-            200.0,
-        );
+        let fov = 90.0 * std::f32::consts::PI / 180.0;
+        let near = 0.1;
+        let far = 200.0;
+        let view_proj = self
+            .camera
+            .create_view_projection_matrix(aspect, fov, near, far);
+
         for event in self.event_pump.poll_iter().collect::<Vec<_>>() {
             if self.mouse_captured {
                 self.input.process_event(&event);
             }
             self.egui.process_event(&event);
             match event {
-                Event::Quit { .. } => return false,
+                Event::Quit { .. } => {
+                    return false;
+                }
                 Event::KeyDown {
                     keycode: Some(keycode),
                     ..
@@ -386,6 +680,15 @@ impl State {
                     sdl2::keyboard::Keycode::C => {
                         self.egui_enabled = !self.egui_enabled;
                     }
+                    sdl2::keyboard::Keycode::R => {
+                        self.frustum_transform =
+                            cgmath::Matrix4::from_translation(self.camera.get_position())
+                                * cgmath::Matrix4::from_angle_y(cgmath::Rad(self.camera.yaw()))
+                                * cgmath::Matrix4::from_angle_x(-cgmath::Rad(self.camera.pitch()));
+                        for r in &mut self.frustum_renderables {
+                            r.transform = self.frustum_transform;
+                        }
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -395,9 +698,24 @@ impl State {
         self.ui();
         self.resize();
         self.workvec.clear();
-        self.workvec.extend(self.renderables.iter().cloned());
+        /* let fov = 50.0 * std::f32::consts::PI / 180.0;
+        let near = 1.0;
+        let far = 20.0;
+        let aspect = 1.0; */
+        let frustum = create_frustum(fov, far, aspect, near);
+        self.workvec.extend(
+            self.renderables
+                .iter()
+                //.filter(|r| check_frustum(r, frustum, self.frustum_transform, near, far))
+                .cloned(),
+        );
         self.workvec.extend(self.egui.renderables().iter().cloned());
-        if let Some((gpu_wait, cpu_work_time)) = self.renderer.render(&self.workvec, view_proj) {
+        self.workvec
+            .extend(self.frustum_renderables.iter().cloned());
+        if let Some((gpu_wait, cpu_work_time)) =
+            self.renderer
+                .render(&self.workvec, view_proj, frustum, self.camera.transform())
+        {
             self.last_frame_times.push_back((
                 time,
                 dt,
@@ -409,6 +727,35 @@ impl State {
         self.last_time = now;
         true
     }
+}
+
+fn check_frustum(
+    r: &Renderable,
+    frustum: Frustum,
+    camera: cgmath::Matrix4<f32>,
+    near: f32,
+    far: f32,
+) -> bool {
+    let scale = r.transform.diagonal();
+    let scale = scale.x.max(scale.y).max(scale.z);
+    let radius = r.mesh.bounds.sphere_bounds * scale;
+
+    let center = r.transform * Vector4::new(0.0, 0.0, 0.0, 1.0);
+    let center_in_frustum_space = camera.invert().unwrap() * center;
+    let center_in_frustum_space = center_in_frustum_space.truncate();
+    let near_plane_position = Vector3::new(0.0, 0.0, near);
+    let far_plane_position = Vector3::new(0.0, 0.0, far);
+
+    (center_in_frustum_space - Vector3::new(0.0, 0.0, -radius) - near_plane_position)
+        .dot(frustum.near)
+        > 0.0
+        && (center_in_frustum_space + Vector3::new(0.0, 0.0, -radius) - far_plane_position)
+            .dot(frustum.far)
+            > 0.0
+        && (center_in_frustum_space + frustum.top * radius).dot(frustum.top) > 0.0
+        && (center_in_frustum_space + frustum.bottom * radius).dot(frustum.bottom) > 0.0
+        && (center_in_frustum_space + frustum.left * radius).dot(frustum.left) > 0.0
+        && (center_in_frustum_space + frustum.right * radius).dot(frustum.right) > 0.0
 }
 
 impl Drop for State {
@@ -458,16 +805,7 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
         ));
         let width = args.width;
         let height = args.height;
-        let vertex_description = DefaultVertex::description();
         let shader_stages = [&vert_shader, &frag_shader];
-        /* let color_blend_attachment = color_blend_attachment
-        .blend_enable(true)
-        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-        .color_blend_op(vk::BlendOp::ADD)
-        .src_alpha_blend_factor(vk::BlendFactor::SRC_ALPHA)
-        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-        .alpha_blend_op(vk::BlendOp::SUBTRACT); */
         let view_port = vk::Viewport {
             x: 0.0,
             y: 0.0,
@@ -476,7 +814,7 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
             min_depth: 0.0,
             max_depth: 1.0,
         };
-        Pipeline::new(
+        Pipeline::new::<DefaultVertex>(
             args.device.clone(),
             **args.render_pass,
             &PipelineDesc {
@@ -489,7 +827,6 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
                     ..Default::default()
                 },
                 shader_stages: &shader_stages,
-                vertex_description,
                 input_assembly_state: InputAssemblyState {
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                 },
@@ -505,9 +842,94 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
                     test: Some(vk::CompareOp::LESS),
                 },
             },
-            String::from(label!("MeshPipeline")),
+            &label!("MeshPipeline"),
         )
     })
+}
+
+#[allow(dead_code)]
+struct ColorVertex {
+    position: cgmath::Vector3<f32>,
+    normal: cgmath::Vector3<f32>,
+    color: [u8; 3],
+}
+
+impl Vertex for ColorVertex {
+    fn position(&self) -> cgmath::Vector3<f32> {
+        self.position
+    }
+    fn description() -> VertexInfoDescription {
+        let bindings = vec![vk::VertexInputBindingDescriptionBuilder::new()
+            .binding(0)
+            .stride(std::mem::size_of::<Self>().try_into().unwrap())
+            .input_rate(vk::VertexInputRate::VERTEX)];
+        let attributes = vec![
+            vk::VertexInputAttributeDescriptionBuilder::new()
+                .binding(0)
+                .location(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescriptionBuilder::new()
+                .binding(0)
+                .location(1)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(std::mem::size_of::<[f32; 3]>().try_into().unwrap()),
+            vk::VertexInputAttributeDescriptionBuilder::new()
+                .binding(0)
+                .location(2)
+                .format(vk::Format::R8G8B8_UNORM)
+                .offset(std::mem::size_of::<[f32; 6]>().try_into().unwrap()),
+        ];
+        VertexInfoDescription {
+            bindings,
+            attributes,
+        }
+    }
+    fn new(v: basalt::LoadingVertex) -> Self {
+        Self {
+            position: v.position,
+            normal: v.normal,
+            color: v.color.map(|a| a[0..3].try_into().unwrap()).unwrap_or([
+                (v.normal.x * 256.0) as u8,
+                (v.normal.y * 256.0) as u8,
+                (v.normal.z * 256.0) as u8,
+            ]),
+        }
+    }
+}
+
+#[allow(dead_code)]
+struct LineVertex {
+    position: cgmath::Vector3<f32>,
+    color: [u8; 3],
+}
+
+impl Vertex for LineVertex {
+    fn position(&self) -> cgmath::Vector3<f32> {
+        self.position
+    }
+    fn description() -> VertexInfoDescription {
+        let bindings = vec![vk::VertexInputBindingDescriptionBuilder::new()
+            .binding(0)
+            .stride(std::mem::size_of::<Self>().try_into().unwrap())
+            .input_rate(vk::VertexInputRate::VERTEX)];
+        let attributes = vec![
+            vk::VertexInputAttributeDescriptionBuilder::new()
+                .binding(0)
+                .location(0)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescriptionBuilder::new()
+                .binding(0)
+                .location(1)
+                .format(vk::Format::R8G8B8_UNORM)
+                .offset(std::mem::size_of::<[f32; 3]>().try_into().unwrap()),
+        ];
+        VertexInfoDescription {
+            bindings,
+            attributes,
+        }
+    }
 }
 
 fn rgb_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
@@ -541,7 +963,6 @@ fn rgb_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
             &pipeline_layout_info,
             label!("RgbPipelineLayout"),
         ));
-        let vertex_description = DefaultVertex::description();
         let view_port = vk::Viewport {
             x: 0.0,
             y: 0.0,
@@ -550,7 +971,7 @@ fn rgb_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
             min_depth: 0.0,
             max_depth: 1.0,
         };
-        Pipeline::new(
+        Pipeline::new::<ColorVertex>(
             args.device.clone(),
             **args.render_pass,
             &PipelineDesc {
@@ -560,7 +981,6 @@ fn rgb_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
                     .extent(vk::Extent2D { width, height }),
                 color_blend_attachment: Default::default(),
                 shader_stages: &shader_stages,
-                vertex_description,
                 input_assembly_state: InputAssemblyState {
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                 },
@@ -576,7 +996,76 @@ fn rgb_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
                     test: Some(vk::CompareOp::LESS),
                 },
             },
-            String::from(label!("RgbPipeline")),
+            &label!("RgbPipeline"),
+        )
+    })
+}
+
+fn line_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
+    let frag_shader = ShaderModule::new(
+        device.clone(),
+        include_bytes!("../../shaders/line.frag.spv"),
+        String::from(label!("LinePipelineFragmentShader")),
+        vk::ShaderStageFlagBits::FRAGMENT,
+    );
+    let vert_shader = ShaderModule::new(
+        device.clone(),
+        include_bytes!("../../shaders/line.vert.spv"),
+        String::from("LinePipelineVertexShader"),
+        vk::ShaderStageFlagBits::VERTEX,
+    );
+
+    Box::new(move |args| {
+        let width = args.width;
+        let height = args.height;
+        let shader_stages = [&vert_shader, &frag_shader];
+        let set_layouts = vec![args.global_set_layout];
+        let set_layouts = set_layouts
+            .iter()
+            .map(|l| ****l)
+            .collect::<Vec<vk::DescriptorSetLayout>>();
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&[]);
+        let pipeline_layout = Arc::new(PipelineLayout::new(
+            args.device.clone(),
+            &pipeline_layout_info,
+            label!("LinePipelineLayout"),
+        ));
+        let view_port = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: width as f32,
+            height: height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        Pipeline::new::<LineVertex>(
+            args.device.clone(),
+            **args.render_pass,
+            &PipelineDesc {
+                view_port,
+                scissor: vk::Rect2DBuilder::new()
+                    .offset(vk::Offset2D { x: 0, y: 0 })
+                    .extent(vk::Extent2D { width, height }),
+                color_blend_attachment: Default::default(),
+                shader_stages: &shader_stages,
+                input_assembly_state: InputAssemblyState {
+                    topology: vk::PrimitiveTopology::LINE_LIST,
+                },
+                rasterization_state: RasterizationState {
+                    polygon_mode: vk::PolygonMode::FILL,
+                    front_face: vk::FrontFace::COUNTER_CLOCKWISE,
+                    cull_mode: vk::CullModeFlags::NONE,
+                },
+                multisample_state: MultiSamplingState {},
+                layout: Arc::clone(&pipeline_layout),
+                depth_stencil: DepthStencilInfo {
+                    write: true,
+                    test: Some(vk::CompareOp::LESS),
+                },
+            },
+            &label!("RgbPipeline"),
         )
     })
 }

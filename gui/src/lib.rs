@@ -3,6 +3,7 @@ use basalt::{
     DepthStencilInfo, DescriptorSetLayout, InputAssemblyState, Mesh, MultiSamplingState, Pipeline,
     PipelineDesc, PipelineLayout, RasterizationState, Renderable, Renderer, Sampler, ShaderModule,
 };
+use egui::FontImage;
 use sdl2::event::Event;
 use std::sync::Arc;
 
@@ -70,10 +71,11 @@ fn sdl2_key_to_egui_key(key: sdl2::keyboard::Keycode) -> Option<KeyOrEvent> {
     }))
 }
 
+#[repr(transparent)]
 struct EguiVertex(egui::epaint::Vertex);
 
-impl EguiVertex {
-    pub fn get_vertex_description() -> basalt::VertexInfoDescription {
+impl basalt::Vertex for EguiVertex {
+    fn description() -> basalt::VertexInfoDescription {
         assert_eq!(
             std::mem::size_of::<Self>(),
             std::mem::size_of::<egui::epaint::Vertex>()
@@ -110,6 +112,10 @@ impl EguiVertex {
             attributes,
         }
     }
+
+    fn position(&self) -> cgmath::Vector3<f32> {
+        cgmath::Vector3::new(self.0.pos.x, self.0.pos.y, 0.0)
+    }
 }
 
 pub struct EruptEgui {
@@ -145,7 +151,6 @@ impl EruptEgui {
             .unwrap();
 
         let pipeline = app.register_pipeline(Box::new(move |params| {
-            let vertex_description = EguiVertex::get_vertex_description();
             let width = params.width;
             let height = params.height;
             let shader_stages = [&vert_shader, &frag_shader];
@@ -166,7 +171,7 @@ impl EruptEgui {
                 min_depth: 0.0,
                 max_depth: 1.0,
             };
-            Pipeline::new(
+            Pipeline::new::<EguiVertex>(
                 params.device.clone(),
                 **params.render_pass,
                 &PipelineDesc {
@@ -180,7 +185,6 @@ impl EruptEgui {
                         dst_color_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
                     },
                     shader_stages: &shader_stages,
-                    vertex_description,
                     input_assembly_state: InputAssemblyState {
                         topology: vk::PrimitiveTopology::TRIANGLE_LIST,
                     },
@@ -196,7 +200,7 @@ impl EruptEgui {
                         test: None,
                     },
                 },
-                label!("EguiPipeline"),
+                &label!("EguiPipeline"),
             )
         }));
         let buffers = (0..=frames_in_flight)
@@ -249,8 +253,8 @@ impl EruptEgui {
     }
     fn default_input() -> egui::RawInput {
         egui::RawInput {
-            scroll_delta: egui::Vec2::new(0.0, 0.0),
-            zoom_delta: 1.0,
+            //scroll_delta: egui::Vec2::new(0.0, 0.0),
+            //zoom_delta: 1.0,
             screen_rect: Some(egui::Rect::from_min_max(
                 egui::pos2(0.0, 0.0),
                 egui::pos2(100.0, 100.0),
@@ -268,7 +272,7 @@ impl EruptEgui {
         &mut self,
         image_loader: &Loader,
         descriptor_set_manager: &basalt::DescriptorSetManager,
-        texture: &egui::Texture,
+        texture: &egui::FontImage,
     ) {
         let data = texture
             .pixels
@@ -307,7 +311,8 @@ impl EruptEgui {
             &mut self.raw_input,
             Self::default_input(),
         ));
-        let texture = self.ctx.fonts().texture();
+        let texture: Arc<FontImage> = self.ctx.fonts().font_image();
+
         if texture.version != self.font_texture_version {
             self.font_texture_version = texture.version;
             self.upload_font_texture(
@@ -334,6 +339,10 @@ impl EruptEgui {
         width: f32,
         height: f32,
     ) -> Vec<Renderable> {
+        assert_eq!(
+            std::mem::size_of::<EguiVertex>(),
+            std::mem::size_of::<egui::epaint::Vertex>()
+        );
         let font_texture = if let Some(font_texture) = self.texture.as_ref() {
             font_texture.set.clone()
         } else {
@@ -355,12 +364,27 @@ impl EruptEgui {
                 };
                 let min = cgmath::Vector3::new(rect.min.x, rect.min.y, 0.0);
                 let max = cgmath::Vector3::new(rect.max.x, rect.max.y, 0.0);
+                let sphere_bounds = *[min, max]
+                    .map(cgmath::InnerSpace::magnitude)
+                    .iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap();
                 let (mesh, size) = if let Some((mesh, size)) = Mesh::new_into_buffer(
-                    &mesh.vertices,
+                    unsafe {
+                        std::slice::from_raw_parts(
+                            mesh.vertices.as_ptr() as *const EguiVertex,
+                            mesh.vertices.len(),
+                        )
+                    },
                     &mesh.indices,
-                    basalt::Bounds { max, min },
+                    basalt::Bounds {
+                        max,
+                        min,
+                        sphere_bounds,
+                    },
                     buffer.clone(),
                     offset,
+                    String::from("EguiMesh"),
                 ) {
                     (mesh, size)
                 } else {

@@ -15,6 +15,9 @@ compile $base/shaders/mesh.frag frag
 compile $base/shaders/egui.vert vert
 compile $base/shaders/egui.frag frag
 
+compile $base/shaders/line.vert vert
+compile $base/shaders/line.frag frag
+
 compile $base/shaders/cull.comp comp
 
 # cargo run --bin extract_structs -- ./shaders/*.spv > ./shaders/shader_types.rs

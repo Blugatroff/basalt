@@ -5,10 +5,22 @@ pub struct GlobalUniform {
     pub view: ::cgmath::Matrix4<f32>,
     pub proj: ::cgmath::Matrix4<f32>,
     pub view_proj: ::cgmath::Matrix4<f32>,
+    pub camera_transform: ::cgmath::Matrix4<f32>,
+
+    pub frustum_top_normal: ::cgmath::Vector4<f32>,
+    pub frustum_bottom_normal: ::cgmath::Vector4<f32>,
+    pub frustum_right_normal: ::cgmath::Vector4<f32>,
+    pub frustum_left_normal: ::cgmath::Vector4<f32>,
+    pub frustum_far_normal: ::cgmath::Vector4<f32>,
+    pub frustum_near_normal: ::cgmath::Vector4<f32>,
+
     pub time: f32,
     pub renderables_count: u32,
     pub screen_width: f32,
     pub screen_height: f32,
+
+    pub near: f32,
+    pub far: f32,
 }
 
 #[repr(C)]
@@ -51,12 +63,8 @@ pub struct IndirectDrawCommand {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct Mesh {
-    pub bounds_max: cgmath::Vector3<f32>,
+    pub sphere_bounds: f32,
     pub first_index: u32,
-    pub bounds_min: cgmath::Vector3<f32>,
     pub index_count: u32,
     pub vertex_offset: i32,
-    pub padding_0: u32,
-    pub padding_1: u32,
-    pub padding_2: u32,
 }

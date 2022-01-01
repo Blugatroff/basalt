@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sdl2 = "*"
+sdl2 = "0.35.1"
 basalt = { path = "../basalt/" }
-egui = "*"
+egui = "0.16.1"
 cgmath = "0.18"
 shaders = { path = "../shaders" }
-
