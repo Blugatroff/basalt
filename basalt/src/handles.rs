@@ -2,7 +2,7 @@ use crate::{
     mesh::VertexInfoDescription,
     utils::{log_resource_created, log_resource_dropped, ColorBlendAttachment, DepthStencilInfo},
     utils::{InputAssemblyState, MultiSamplingState, RasterizationState},
-    Vertex,
+    DescriptorSetLayout, Vertex,
 };
 use erupt::{cstr, vk};
 use std::{any::TypeId, ffi::CString, io::Read, marker::PhantomData, sync::Arc};
@@ -381,6 +381,79 @@ impl Drop for Pipeline {
     }
 }
 
+#[derive(Debug)]
+pub struct PipelineLayout {
+    inner: vk::PipelineLayout,
+    device: Arc<Device>,
+    name: String,
+    set_layouts: Vec<Arc<DescriptorSetLayout>>,
+}
+
+impl PipelineLayout {
+    pub fn new(
+        device: Arc<Device>,
+        set_layouts: Vec<Arc<DescriptorSetLayout>>,
+        _push_constants: (),
+        name: &dyn ToString,
+    ) -> Self {
+        let name = name.to_string();
+        let inner = {
+            let set_layouts: Vec<vk::DescriptorSetLayout> =
+                set_layouts.iter().map(|l| ***l).collect::<Vec<_>>();
+            let info = vk::PipelineLayoutCreateInfoBuilder::new()
+                .set_layouts(&set_layouts)
+                .push_constant_ranges(&[]);
+            log_resource_created("PipelineLayout", &name);
+            unsafe { device.create_pipeline_layout(&info, None).unwrap() }
+        };
+        Self {
+            inner,
+            device,
+            name,
+            set_layouts,
+        }
+    }
+    pub fn compatible_with(&self, set_layouts: &[DescriptorSetLayout]) -> bool {
+        if set_layouts.len() < self.set_layouts.len() {
+            return false;
+        }
+        for (a, b) in self.set_layouts.iter().zip(set_layouts) {
+            let a = a.bindings();
+            let b = b.bindings();
+            if a.len() > b.len() {
+                return false;
+            }
+            for (a, b) in a.iter().zip(b) {
+                if a.ty != b.ty {
+                    return false;
+                }
+                if a.binding != b.binding {
+                    return false;
+                }
+                if a.stage_flags != b.stage_flags {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+impl std::ops::Deref for PipelineLayout {
+    type Target = vk::PipelineLayout;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Drop for PipelineLayout {
+    fn drop(&mut self) {
+        log_resource_dropped("PipelineLayout", &self.name);
+        unsafe { self.device.destroy_pipeline_layout(Some(self.inner), None) }
+    }
+}
+
 pub struct Surface {
     surface: vk::SurfaceKHR,
     instance: Arc<Instance>,
@@ -580,14 +653,6 @@ handle!(
     vk::ImageViewCreateInfoBuilder,
     |device: &Arc<Device>, info| unsafe { device.create_image_view(info, None).unwrap() },
     |device: &Arc<Device>, inner| unsafe { device.destroy_image_view(Some(inner), None) }
-);
-
-handle!(
-    PipelineLayout,
-    vk::PipelineLayout,
-    vk::PipelineLayoutCreateInfoBuilder,
-    |device: &Arc<Device>, info| unsafe { device.create_pipeline_layout(info, None).unwrap() },
-    |device: &Arc<Device>, inner| unsafe { device.destroy_pipeline_layout(Some(inner), None) }
 );
 
 handle!(

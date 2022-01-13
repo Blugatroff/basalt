@@ -48,6 +48,7 @@ pub use utils::RasterizationState;
 pub use vk_mem_erupt;
 pub mod buffer;
 pub mod image;
+pub use descriptor_sets::DescriptorSet;
 pub use mesh::LoadingVertex;
 
 mod descriptor_sets;
@@ -55,7 +56,6 @@ mod frame;
 mod handles;
 mod mesh;
 mod utils;
-use crate::descriptor_sets::DescriptorSet;
 use crate::handles::ComputePipeline;
 use crate::handles::DebugUtilsMessenger;
 use crate::utils::create_cull_set;
@@ -65,6 +65,8 @@ use erupt::cstr;
 use frame::FrameData;
 use frame::Frames;
 use handles::{Fence, Framebuffer, ImageView, Instance, RenderPass, Surface, Swapchain};
+use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::Mutex;
 use std::{
     ffi::{c_void, CStr},
@@ -103,13 +105,13 @@ unsafe extern "system" fn debug_callback(
 }
 
 #[derive(Clone, Debug)]
-pub struct Renderable {
-    pub transform: cgmath::Matrix4<f32>,
-    pub mesh: Arc<Mesh>,
-    pub custom_set: Option<Arc<DescriptorSet>>,
+pub struct Renderable<'a> {
+    pub transform: &'a cgmath::Matrix4<f32>,
+    pub mesh: &'a Arc<Mesh>,
+    pub custom_set: Option<&'a Arc<DescriptorSet>>,
     pub custom_id: u32,
     pub uncullable: bool,
-    pub pipeline: usize,
+    pub pipeline: &'a PipelineHandle,
 }
 
 pub struct PipelineCreationParams<'a> {
@@ -129,7 +131,7 @@ struct InstancingBatch<'a> {
     index_start: u32,
     instance_count: u32,
     vertex_start: u32,
-    renderables: Vec<&'a Renderable>,
+    renderables: Vec<Renderable<'a>>,
     custom_set: Option<&'a DescriptorSet>,
     mesh: u32,
     first_instance: u32,
@@ -148,9 +150,33 @@ struct BatchingResult<'a> {
     batches: Vec<InstancingBatch<'a>>,
     meshes: Vec<Arc<Mesh>>,
     sets: Vec<Option<Arc<DescriptorSet>>>,
+    pipelines: Vec<Arc<Pipeline>>,
+    num_renderables: usize,
 }
 
 pub type MaterialLoadFn = Box<dyn for<'a> Fn(PipelineCreationParams<'a>) -> Pipeline>;
+
+type PipelineStorage = HashMap<usize, (Arc<Pipeline>, MaterialLoadFn)>;
+
+pub struct PipelineHandle(Arc<Mutex<PipelineStorage>>, usize);
+
+impl PipelineHandle {
+    pub fn key(&self) -> usize {
+        self.1
+    }
+}
+
+impl Debug for PipelineHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PipelineHandle").field(&self.1).finish()
+    }
+}
+
+impl Drop for PipelineHandle {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().remove(&self.1);
+    }
+}
 
 pub struct TransferContext {
     pub transfer_queue: Arc<Mutex<Queue>>,
@@ -158,6 +184,42 @@ pub struct TransferContext {
     pub transfer_family: QueueFamily,
     pub command_pool: Mutex<CommandPool>,
     pub fence: Mutex<Fence>,
+    pub device: Arc<Device>,
+}
+
+impl TransferContext {
+    pub fn immediate_submit(&self, f: impl FnOnce(vk::CommandBuffer)) {
+        unsafe {
+            let fence = self.fence.lock().unwrap();
+            let command_pool = self.command_pool.lock().unwrap();
+            self.device.reset_fences(&[**fence]).unwrap();
+            let alloc_info = vk::CommandBufferAllocateInfoBuilder::new()
+                .command_buffer_count(1)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_pool(**command_pool);
+            let cmd = self.device.allocate_command_buffers(&alloc_info).unwrap()[0];
+            let begin_info = vk::CommandBufferBeginInfoBuilder::new()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.device.begin_command_buffer(cmd, &begin_info).unwrap();
+            f(cmd);
+            self.device.end_command_buffer(cmd).unwrap();
+            let cmds = &[cmd];
+            let submit_info = vk::SubmitInfoBuilder::new().command_buffers(cmds);
+            let queue = self.transfer_queue.lock().unwrap();
+            self.device
+                .queue_submit(**queue, &[submit_info], Some(**fence))
+                .unwrap();
+            drop(queue);
+            self.device
+                .wait_for_fences(&[**fence], true, 1_000_000_000)
+                .unwrap();
+            self.device
+                .reset_command_pool(**command_pool, None)
+                .unwrap();
+            drop(command_pool);
+            drop(fence);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -175,7 +237,7 @@ pub struct Frustum {
 #[allow(clippy::struct_excessive_bools)]
 pub struct Renderer {
     compute_pipeline: ComputePipeline,
-    compute_set_layout: DescriptorSetLayout,
+    compute_set_layout: Arc<DescriptorSetLayout>,
     start: std::time::Instant,
     supported_present_modes: Vec<vk::PresentModeKHR>,
     present_mode: vk::PresentModeKHR,
@@ -199,7 +261,7 @@ pub struct Renderer {
     image_loader: image::Loader,
     transfer_context: Arc<TransferContext>,
     physical_device_properties: vk::PhysicalDeviceProperties,
-    materials: Vec<(Pipeline, MaterialLoadFn)>,
+    materials: Arc<Mutex<PipelineStorage>>,
     global_uniform: shaders::GlobalUniform,
     global_set_layout: Arc<DescriptorSetLayout>,
     surface: Surface,
@@ -208,13 +270,12 @@ pub struct Renderer {
     allocator: Arc<Allocator>,
     device: Arc<Device>,
     instance: Arc<Instance>,
-    /// This field must be dropped last because other fields might rely on the objects inside it being alive.
+    /// This field must be dropped last because other fields might rely on the objects inside being alive.
     #[allow(dead_code)]
     keep_alive: Vec<Box<dyn std::any::Any + 'static>>,
 }
 
 impl Renderer {
-    #[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
     #[must_use]
     pub fn new(
         window: Arc<Mutex<sdl2::video::Window>>,
@@ -377,7 +438,7 @@ impl Renderer {
                 ))
             })
             .collect::<Vec<_>>();
-        let compute_set_layout = DescriptorSetLayout::new(
+        let compute_set_layout = Arc::new(DescriptorSetLayout::new(
             device.clone(),
             vec![
                 DescriptorSetLayoutBinding {
@@ -396,7 +457,7 @@ impl Renderer {
                 },
             ],
             None,
-        );
+        ));
 
         let indirect_buffers = (0..frames_in_flight)
             .map(|_| Arc::new(create_indirect_buffer(allocator.clone(), 2)))
@@ -436,24 +497,8 @@ impl Renderer {
             cleanup,
             indirect_buffers,
         };
-        let materials: Vec<MaterialLoadFn> = Vec::new();
-
-        let materials = materials
-            .into_iter()
-            .map(|f| {
-                std::thread::sleep(std::time::Duration::from_millis(50000));
-                (
-                    f(PipelineCreationParams {
-                        device: &device,
-                        width,
-                        height,
-                        render_pass: &render_pass,
-                        global_set_layout: &global_set_layout,
-                    }),
-                    f,
-                )
-            })
-            .collect();
+        let materials = HashMap::new();
+        let materials = Arc::new(Mutex::new(materials));
         let fence_info = vk::FenceCreateInfoBuilder::new().flags(vk::FenceCreateFlags::empty());
         let fence = Mutex::new(Fence::new(
             device.clone(),
@@ -483,6 +528,7 @@ impl Renderer {
             graphics_family,
             transfer_family,
             fence,
+            device: device.clone(),
         });
         let image_loader = image::Loader {
             device: device.clone(),
@@ -498,18 +544,15 @@ impl Renderer {
             vk::ShaderStageFlagBits::VERTEX,
         );
 
-        let compute_set_layouts = [**global_set_layout, *compute_set_layout];
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
-            .set_layouts(&compute_set_layouts)
-            .flags(vk::PipelineLayoutCreateFlags::default());
         let compute_pipeline_layout = Arc::new(PipelineLayout::new(
             device.clone(),
-            &pipeline_layout_info,
-            "CullPipelineLayout",
+            vec![global_set_layout.clone(), compute_set_layout.clone()],
+            (),
+            &label!("CullPipelineLayout"),
         ));
         let compute_pipeline = ComputePipeline::new(
             device.clone(),
-            compute_pipeline_layout.clone(),
+            compute_pipeline_layout,
             &cull_shader,
             "CullPipeline",
         );
@@ -586,10 +629,17 @@ impl Renderer {
             global_set_layout: &self.global_set_layout,
         }
     }
-    pub fn register_pipeline(&mut self, create_fn: MaterialLoadFn) -> usize {
-        let material = create_fn(self.pipeline_creation_params());
-        self.materials.push((material, create_fn));
-        self.materials.len() - 1
+    pub fn register_pipeline(&mut self, create_fn: MaterialLoadFn) -> PipelineHandle {
+        let mut materials = self.materials.lock().unwrap();
+        let material = Arc::new(create_fn(self.pipeline_creation_params()));
+        static mut K: usize = 0;
+        let mut k = unsafe { K };
+        while materials.get(&k).is_some() {
+            k += 1;
+        }
+        unsafe { K = k + 1 };
+        materials.insert(k, (material, create_fn));
+        PipelineHandle(self.materials.clone(), k)
     }
     fn set_present_mode(&mut self) {
         if self.vsync {
@@ -757,14 +807,10 @@ impl Renderer {
         true
     }
     fn reload_pipelines(&mut self) {
-        for i in 0..self.materials.len() {
-            let material = unsafe {
-                // safe as long as pipeline_create_params() doesn't access self.materials[i] i think :D
-                &mut *(&mut self.materials[i] as *mut (Pipeline, MaterialLoadFn))
-            };
+        let mut materials = self.materials.lock().unwrap();
+        for (_, (pipeline, f)) in materials.iter_mut() {
             let params = self.pipeline_creation_params();
-            let new_material = material.1(params);
-            material.0 = new_material;
+            *pipeline = Arc::new(f(params));
         }
     }
     #[rustfmt::skip]
@@ -809,28 +855,37 @@ impl Renderer {
         self.uniform_buffer.unmap();
         global_uniform_offset
     }
-    fn batch_renderables<'a>(
-        materials: &'a [(Pipeline, MaterialLoadFn)],
-        renderables: impl IntoIterator<Item = &'a Renderable>,
-    ) -> BatchingResult<'a> {
+    fn batch_renderables<'a, 'b, 'c>(
+        materials: &'a PipelineStorage,
+        renderables: impl IntoIterator<Item = Renderable<'b>>,
+    ) -> BatchingResult<'c>
+    where
+        'a: 'c,
+        'b: 'c,
+    {
         let mut last_mesh: *const Mesh = std::ptr::null();
-        let mut last_pipeline: Option<usize> = None;
+        let mut last_pipeline: *const PipelineHandle = std::ptr::null();
         let mut last_custom_set: *const DescriptorSet = std::ptr::null();
         let mut batches: Vec<InstancingBatch> = Vec::new();
         let mut meshes: Vec<Arc<Mesh>> = Vec::new();
         let mut custom_descriptor_sets: Vec<Option<Arc<DescriptorSet>>> = Vec::new();
+        let mut pipelines: Vec<Arc<Pipeline>> = Vec::new();
+        let mut num_renderables = 0;
+        let mut pipeline: Option<&Pipeline> = None;
         for (i, renderable) in renderables.into_iter().enumerate() {
-            let this_mesh = &*renderable.mesh as *const Mesh;
-            let this_pipeline = Some(renderable.pipeline);
-            let this_custom_set = renderable
-                .custom_set
-                .as_ref()
-                .map_or(std::ptr::null(), Arc::as_ptr);
+            let this_mesh = &**renderable.mesh as *const Mesh;
+            let this_pipeline = renderable.pipeline as *const PipelineHandle;
+            let this_custom_set = renderable.custom_set.map_or(std::ptr::null(), Arc::as_ptr);
             if this_mesh != last_mesh {
-                meshes.push(Arc::clone(&renderable.mesh));
+                meshes.push(Arc::clone(renderable.mesh));
             }
             if this_custom_set != last_custom_set {
-                custom_descriptor_sets.push(renderable.custom_set.as_ref().map(Arc::clone));
+                custom_descriptor_sets.push(renderable.custom_set.map(Arc::clone));
+            }
+            if last_pipeline != this_pipeline {
+                let p = &materials.get(&renderable.pipeline.key()).unwrap().0;
+                pipeline = Some(&**p);
+                pipelines.push(p.clone());
             }
             if this_mesh == last_mesh
                 && this_pipeline == last_pipeline
@@ -845,7 +900,7 @@ impl Renderer {
             last_pipeline = this_pipeline;
             last_custom_set = this_custom_set;
 
-            let pipeline = &materials.get(renderable.pipeline).unwrap().0;
+            let pipeline = pipeline.unwrap();
             if pipeline.vertex_type() != renderable.mesh.vertex_type() {
                 panic!(
                     "Different vertex types! Pipeline ({}): {:?}, mesh({}): {:?}",
@@ -856,7 +911,7 @@ impl Renderer {
                 );
             }
             batches.push(InstancingBatch {
-                custom_set: renderable.custom_set.as_deref(),
+                custom_set: renderable.custom_set.map(|a| &**a),
                 index_count: renderable.mesh.index_count,
                 index_start: renderable.mesh.index_start,
                 index_vertex_buffer: &renderable.mesh.buffer,
@@ -867,11 +922,14 @@ impl Renderer {
                 renderables: Vec::from([renderable]),
                 first_instance: i as u32,
             });
+            num_renderables = i;
         }
         BatchingResult {
             batches,
             meshes,
             sets: custom_descriptor_sets,
+            pipelines,
+            num_renderables,
         }
     }
     fn batch_batches<'a>(batches: &'a [InstancingBatch<'a>]) -> Vec<IndirectDraw<'a>> {
@@ -914,7 +972,7 @@ impl Renderer {
             slice[batch_id].first_instance = batch.first_instance;
             for renderable in &batch.renderables {
                 //slice[i].redirect = i as u32;
-                slice[i].transform = renderable.transform;
+                slice[i].transform = *renderable.transform;
                 slice[i].batch = batch_id.try_into().unwrap();
                 slice[i].draw = batch_id.try_into().unwrap();
                 slice[i].uncullable = if renderable.uncullable { 1 } else { 0 };
@@ -1007,24 +1065,9 @@ impl Renderer {
             res.value.map(|value| value as usize)
         }
     }
-    fn resize_mesh_buffer_if_necessary<'a>(
-        &mut self,
-        renderables: impl IntoIterator<Item = &'a Renderable>,
-        frame_index: usize,
-    ) {
+    fn resize_mesh_buffer_if_necessary(&mut self, num_meshes: usize, frame_index: usize) {
         let frame = self.frames.get_mut(frame_index);
-        let meshes = renderables
-            .into_iter()
-            .map(|r| Arc::as_ptr(&r.mesh))
-            .fold((0, std::ptr::null()), |(i, last), this| {
-                if this == last {
-                    (i, this)
-                } else {
-                    (i + 1, this)
-                }
-            })
-            .0;
-        let mesh_buffer_min_size = meshes * std::mem::size_of::<shaders::Mesh>();
+        let mesh_buffer_min_size = num_meshes * std::mem::size_of::<shaders::Mesh>();
         if mesh_buffer_min_size as u64 > frame.mesh_buffer.size {
             *frame.mesh_buffer = Arc::new(create_mesh_buffer(
                 self.allocator.clone(),
@@ -1232,13 +1275,16 @@ impl Renderer {
             log::warn!("{:#?}", res);
         }
     }
-    pub fn render(
-        &mut self,
-        renderables: &[Renderable],
+    pub fn render<'a, 'r>(
+        &'r mut self,
+        renderables: impl Iterator<Item = Renderable<'a>>,
         view_proj: Matrix4<f32>,
         frustum: Frustum,
         camera_transform: Matrix4<f32>,
-    ) -> Option<(std::time::Duration, std::time::Duration)> {
+    ) -> Option<(std::time::Duration, std::time::Duration)>
+    where
+        'r: 'a,
+    {
         self.frame_number += 1;
         if self.resize(self.width, self.height, self.frames_in_flight, self.vsync) {
             return None;
@@ -1251,20 +1297,25 @@ impl Renderer {
             f(); // Drop the resources which were being used while rendering the previous frame
         }
         drop(frame);
-        let global_uniform_offset = self.update_global_uniform(
-            frame_index,
-            view_proj,
-            frustum,
-            renderables.len().try_into().unwrap(),
-            camera_transform,
-        );
-        self.resize_mesh_buffer_if_necessary(renderables, frame_index);
-        self.resize_renderable_buffer_if_necessary(frame_index, renderables.len());
+        let materials = self.materials.clone();
+        let materials = materials.lock().unwrap();
         let BatchingResult {
             batches,
             meshes,
             sets: custom_sets,
-        } = Self::batch_renderables(&self.materials, renderables);
+            pipelines,
+            num_renderables,
+        } = Self::batch_renderables(&*materials, renderables);
+        let global_uniform_offset = self.update_global_uniform(
+            frame_index,
+            view_proj,
+            frustum,
+            num_renderables.try_into().unwrap(),
+            camera_transform,
+        );
+
+        self.resize_mesh_buffer_if_necessary(meshes.len(), frame_index);
+        self.resize_renderable_buffer_if_necessary(frame_index, num_renderables);
         let mut frame = self.frames.get_mut(frame_index);
         Self::resize_indirect_buffer_if_necessary(
             &self.device,
@@ -1284,11 +1335,12 @@ impl Renderer {
         *frame.cleanup = Some(Box::new(|| {
             drop(meshes);
             drop(custom_sets);
+            drop(pipelines);
         }) as Box<dyn FnOnce()>);
         drop(frame);
         let frame = self.frames.get(frame_index);
         self.begin_command_buffer(&frame);
-        self.record_cull_dispatch(&frame, &batches, renderables.len(), global_uniform_offset);
+        self.record_cull_dispatch(&frame, &batches, num_renderables, global_uniform_offset);
         let cmd = self.begin_render_pass(&frame, swapchain_image_index, [0.15, 0.6, 0.9, 1.0]);
         let indirect_draws = Self::batch_batches(&batches);
         self.record_draws(frame_index, global_uniform_offset, &indirect_draws, cmd);

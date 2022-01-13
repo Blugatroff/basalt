@@ -4,7 +4,6 @@ use crate::{buffer, descriptor_sets};
 use crate::{
     descriptor_sets::{DescriptorSet, DescriptorSetManager},
     handles::{Allocator, Device, ImageView, Sampler},
-    utils::immediate_submit,
     TransferContext,
 };
 use erupt::vk;
@@ -140,10 +139,9 @@ impl Allocated {
             name,
         );
 
-        immediate_submit(
-            &image_loader.device,
-            &image_loader.transfer_context,
-            |cmd| unsafe {
+        image_loader
+            .transfer_context
+            .immediate_submit(|cmd| unsafe {
                 let range = vk::ImageSubresourceRangeBuilder::new()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .base_mip_level(0)
@@ -217,8 +215,7 @@ impl Allocated {
                     &[],
                     &[ownership_transfer_barrier],
                 );
-            },
-        );
+            });
         image
     }
 }

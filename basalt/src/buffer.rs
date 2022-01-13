@@ -1,6 +1,6 @@
 use crate::{
-    handles::{Allocator, Device},
-    utils::{immediate_submit, log_resource_created, log_resource_dropped},
+    handles::Allocator,
+    utils::{log_resource_created, log_resource_dropped},
     TransferContext,
 };
 use erupt::vk;
@@ -53,7 +53,6 @@ impl Allocated {
     }
     pub fn copy_to_device_local(
         &self,
-        device: &Arc<Device>,
         transfer_context: &TransferContext,
         usage: vk::BufferUsageFlags,
     ) -> Allocated {
@@ -67,8 +66,8 @@ impl Allocated {
             erupt::vk1_0::MemoryPropertyFlags::default(),
             label!("MeshBuffer"),
         );
-
-        immediate_submit(device, transfer_context, |cmd| unsafe {
+        let device = transfer_context.device.clone();
+        transfer_context.immediate_submit(|cmd| unsafe {
             device.cmd_copy_buffer(
                 cmd,
                 **self,

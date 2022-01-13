@@ -1,11 +1,11 @@
 mod input;
 use basalt::{
-    image, label, vk, ColorBlendAttachment, DefaultVertex, DepthStencilInfo, DescriptorSetLayout,
-    Device, Frustum, InputAssemblyState, MaterialLoadFn, Mesh, MultiSamplingState, Pipeline,
-    PipelineDesc, PipelineLayout, RasterizationState, Renderable, Renderer, ShaderModule, Vertex,
-    VertexInfoDescription,
+    image, label, vk, ColorBlendAttachment, DefaultVertex, DepthStencilInfo, DescriptorSet,
+    DescriptorSetLayout, Device, Frustum, InputAssemblyState, MaterialLoadFn, Mesh,
+    MultiSamplingState, Pipeline, PipelineDesc, PipelineHandle, PipelineLayout, RasterizationState,
+    Renderable, Renderer, ShaderModule, Vertex, VertexInfoDescription,
 };
-use cgmath::{InnerSpace, Matrix4, SquareMatrix, Vector3, Vector4};
+use cgmath::{InnerSpace, SquareMatrix};
 use first_person_camera::FirstPersonCamera;
 use gui::EruptEgui;
 use input::Input;
@@ -60,261 +60,36 @@ fn create_frustum(fov: f32, far: f32, aspect: f32, near: f32) -> Frustum {
     }
 }
 
-fn create_frustum_model(
-    renderer: &Renderer,
-    far: f32,
-    fov: f32,
-    aspect: f32,
-    near: f32,
-    rgb_pipeline: usize,
-    line_pipeline: usize,
-) -> Vec<Renderable> {
-    let hfar = 2.0 * (fov / 2.0).tan() * far;
-    let wfar = hfar * aspect;
-    let hnear = 2.0 * (fov / 2.0).tan() * near;
-    let wnear = hnear * aspect;
-    let mut far_plane = {
-        let vertices = vec![
-            ColorVertex {
-                position: cgmath::Vector3::new(-wfar / 2.0, -hfar / 2.0, far),
-                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
-                color: [0x0, 0xFF, 0x0],
-            },
-            ColorVertex {
-                position: cgmath::Vector3::new(wfar / 2.0, hfar / 2.0, far),
-                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
-                color: [0x0, 0xFF, 0x0],
-            },
-            ColorVertex {
-                position: cgmath::Vector3::new(-wfar / 2.0, hfar / 2.0, far),
-                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
-                color: [0x0, 0xFF, 0x0],
-            },
-            ColorVertex {
-                position: cgmath::Vector3::new(wfar / 2.0, -hfar / 2.0, far),
-                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
-                color: [0x0, 0xFF, 0x0],
-            },
-        ];
-        let indices = vec![0, 1, 2, 3, 1, 0, 1, 0, 2, 1, 3, 0];
-        Mesh::new(
-            &vertices,
-            &indices,
-            renderer.allocator().clone(),
-            renderer.transfer_context(),
-            renderer.device(),
-            true,
-            String::from("Frustum Far Plane"),
-        )
-    };
-    let mut near_plane = {
-        let vertices = vec![
-            ColorVertex {
-                position: cgmath::Vector3::new(-wnear / 2.0, -hnear / 2.0, near),
-                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
-                color: [0x0, 0xFF, 0xFF],
-            },
-            ColorVertex {
-                position: cgmath::Vector3::new(wnear / 2.0, hnear / 2.0, near),
-                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
-                color: [0x0, 0xFF, 0xFF],
-            },
-            ColorVertex {
-                position: cgmath::Vector3::new(-wnear / 2.0, hnear / 2.0, near),
-                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
-                color: [0x0, 0xFF, 0xFF],
-            },
-            ColorVertex {
-                position: cgmath::Vector3::new(wnear / 2.0, -hnear / 2.0, near),
-                normal: cgmath::Vector3::new(0.0, 0.0, -1.0),
-                color: [0x0, 0xFF, 0xFF],
-            },
-        ];
-        let indices = vec![0, 1, 2, 3, 1, 0, 1, 0, 2, 1, 3, 0];
-        Mesh::new(
-            &vertices,
-            &indices,
-            renderer.allocator().clone(),
-            renderer.transfer_context(),
-            renderer.device(),
-            true,
-            String::from("Frustum Near Plane"),
-        )
-    };
-    let mut lines = {
-        let top_plane_normal = cgmath::Vector3::new(0.0, (fov / 2.0).tan(), 1.0)
-            .cross(cgmath::Vector3::new(-1.0, 0.0, 0.0));
-        let top_plane_line_start = cgmath::Vector3::new(0.0, hfar / 4.0, far / 2.0);
-        let top_plane_line_end = top_plane_line_start + top_plane_normal;
-        let bottom_plane_normal =
-            cgmath::Vector3::new(top_plane_normal.x, -top_plane_normal.y, top_plane_normal.z);
-        let bottom_plane_line_start = cgmath::Vector3::new(0.0, -hfar / 4.0, far / 2.0);
-        let bottom_plane_line_end = bottom_plane_line_start + bottom_plane_normal;
-        let near_plane_normal = cgmath::Vector3::new(0.0, 0.0, 1.0);
-        let near_plane_line_start = cgmath::Vector3::new(0.0, 0.0, near);
-        let near_plane_line_end = near_plane_line_start + near_plane_normal;
-        let left_plane_normal = cgmath::Vector3::new(wfar / 2.0, 0.0, far)
-            .cross(cgmath::Vector3::new(0.0, 1.0, 0.0))
-            .normalize();
-        let left_plane_line_start = cgmath::Vector3::new(wfar / 4.0, 0.0, far / 2.0);
-        let left_plane_line_end = left_plane_line_start + left_plane_normal;
-        let right_plane_normal = cgmath::Vector3::new(
-            -left_plane_normal.x,
-            left_plane_normal.y,
-            left_plane_normal.z,
-        );
-        let right_plane_line_start = cgmath::Vector3::new(-wfar / 4.0, 0.0, far / 2.0);
-        let right_plane_line_end = right_plane_line_start + right_plane_normal;
-        let far_plane_normal = cgmath::Vector3::new(0.0, 0.0, -1.0);
-        let far_plane_line_start = cgmath::Vector3::new(0.0, 0.0, far);
-        let far_plane_line_end = far_plane_line_start + far_plane_normal;
-        let vertices = vec![
-            LineVertex {
-                position: cgmath::Vector3::new(0.0, 0.0, 0.0),
-                color: [0xFF, 0, 0],
-            },
-            LineVertex {
-                position: cgmath::Vector3::new(-wfar / 2.0, -hfar / 2.0, far),
-                color: [0xFF, 0, 0],
-            },
-            LineVertex {
-                position: cgmath::Vector3::new(0.0, 0.0, 0.0),
-                color: [0xFF, 0, 0],
-            },
-            LineVertex {
-                position: cgmath::Vector3::new(wfar / 2.0, hfar / 2.0, far),
-                color: [0xFF, 0, 0],
-            },
-            LineVertex {
-                position: cgmath::Vector3::new(0.0, 0.0, 0.0),
-                color: [0xFF, 0, 0],
-            },
-            LineVertex {
-                position: cgmath::Vector3::new(-wfar / 2.0, hfar / 2.0, far),
-                color: [0xFF, 0, 0],
-            },
-            LineVertex {
-                position: cgmath::Vector3::new(0.0, 0.0, 0.0),
-                color: [0xFF, 0, 0],
-            },
-            LineVertex {
-                position: cgmath::Vector3::new(wfar / 2.0, -hfar / 2.0, far),
-                color: [0xFF, 0, 0],
-            },
-            LineVertex {
-                position: top_plane_line_start,
-                color: [0x0, 0, 0],
-            },
-            LineVertex {
-                position: top_plane_line_end,
-                color: [0x0, 0, 0],
-            },
-            LineVertex {
-                position: bottom_plane_line_start,
-                color: [0x0, 0, 0],
-            },
-            LineVertex {
-                position: bottom_plane_line_end,
-                color: [0x0, 0, 0],
-            },
-            LineVertex {
-                position: near_plane_line_start,
-                color: [0x0, 0, 0],
-            },
-            LineVertex {
-                position: near_plane_line_end,
-                color: [0x0, 0, 0],
-            },
-            LineVertex {
-                position: left_plane_line_start,
-                color: [0x0, 0, 0],
-            },
-            LineVertex {
-                position: left_plane_line_end,
-                color: [0x0, 0, 0],
-            },
-            LineVertex {
-                position: right_plane_line_start,
-                color: [0x0, 0, 0],
-            },
-            LineVertex {
-                position: right_plane_line_end,
-                color: [0x0, 0, 0],
-            },
-            LineVertex {
-                position: far_plane_line_start,
-                color: [0x0, 0, 0],
-            },
-            LineVertex {
-                position: far_plane_line_end,
-                color: [0x0, 0, 0],
-            },
-        ];
-        assert!(vertices.len() % 2 == 0);
-        let indices = (0..vertices.len() as u32).collect::<Vec<u32>>();
-        Mesh::new(
-            &vertices,
-            &indices,
-            renderer.allocator().clone(),
-            renderer.transfer_context(),
-            renderer.device(),
-            true,
-            String::from("Frustum Lines"),
-        )
-    };
-    Mesh::combine_meshes(
-        [&mut far_plane, &mut near_plane, &mut lines],
-        renderer.allocator().clone(),
-        renderer.transfer_context(),
-        renderer.device(),
-    );
-    let far_plane = Renderable {
-        mesh: Arc::new(far_plane),
-        pipeline: rgb_pipeline,
-        transform: cgmath::Matrix4::identity(),
-        custom_set: None,
-        custom_id: 0,
-        uncullable: false,
-    };
-    let near_plane = Renderable {
-        mesh: Arc::new(near_plane),
-        pipeline: rgb_pipeline,
-        transform: cgmath::Matrix4::identity(),
-        custom_set: None,
-        custom_id: 0,
-        uncullable: false,
-    };
-    let lines = Renderable {
-        mesh: Arc::new(lines),
-        pipeline: line_pipeline,
-        transform: cgmath::Matrix4::identity(),
-        custom_set: None,
-        custom_id: 0,
-        uncullable: false,
-    };
-    vec![far_plane, near_plane, lines]
-}
-
 struct State {
     frames_in_flight: usize,
     vsync: bool,
     last_time: std::time::Instant,
     start: std::time::Instant,
     egui: EruptEgui,
-    renderables: Vec<Renderable>,
+    renderables: Vec<OwnedEntity>,
     mouse_captured: bool,
     input: Input,
     camera: FirstPersonCamera,
     last_frame_times: std::collections::VecDeque<(f32, f32, f32, f32)>,
-    workvec: Vec<Renderable>,
     window: Arc<Mutex<sdl2::video::Window>>,
     event_pump: EventPump,
     sdl: sdl2::Sdl,
     renderer: Renderer,
     egui_enabled: bool,
     tx: std::sync::mpsc::Sender<()>,
-    frustum_renderables: Vec<Renderable>,
-    frustum_transform: Matrix4<f32>,
+}
+
+#[derive(Clone)]
+struct Material {
+    pipeline: Arc<PipelineHandle>,
+    custom_set: Option<Arc<DescriptorSet>>,
+}
+
+#[derive(Clone)]
+struct OwnedEntity {
+    mesh: Arc<Mesh>,
+    material: Material,
+    transform: cgmath::Matrix4<f32>,
 }
 
 impl State {
@@ -389,7 +164,6 @@ impl State {
                                     allocator.clone(),
                                     "./assets/suzanne.obj".into(),
                                     &transfer_context,
-                                    &device,
                                 )
                                 .unwrap();
                                 let image = image::Allocated::load(
@@ -417,15 +191,14 @@ impl State {
                 }
             });
         }
-        let rgb_pipeline = renderer.register_pipeline(rgb_pipeline(renderer.device()));
-        let mesh_pipeline = renderer.register_pipeline(mesh_pipeline(renderer.device()));
-        let line_pipeline = renderer.register_pipeline(line_pipeline(renderer.device()));
+        let rgb_pipeline = Arc::new(renderer.register_pipeline(rgb_pipeline(renderer.device())));
+        let mesh_pipeline = Arc::new(renderer.register_pipeline(mesh_pipeline(renderer.device())));
+        let _line_pipeline = Arc::new(renderer.register_pipeline(line_pipeline(renderer.device())));
         let mut triangle_mesh = Mesh::new(
             &vertices,
             &[0, 1, 2, 2, 1, 0],
             renderer.allocator().clone(),
             renderer.transfer_context(),
-            renderer.device(),
             true,
             String::from("TriangleMesh"),
         );
@@ -433,7 +206,6 @@ impl State {
             renderer.allocator().clone(),
             "./assets/suzanne.obj".into(),
             renderer.transfer_context(),
-            renderer.device(),
         )
         .unwrap()
         .swap_remove(0);
@@ -441,7 +213,6 @@ impl State {
             [&mut suzanne_mesh, &mut triangle_mesh],
             renderer.allocator().clone(),
             renderer.transfer_context(),
-            renderer.device(),
         );
         let image = image::Allocated::open(
             renderer.image_loader(),
@@ -455,25 +226,25 @@ impl State {
             image,
             sampler,
         ));
-        let mut suzanne = Renderable {
-            mesh: Arc::new(suzanne_mesh),
-            pipeline: rgb_pipeline,
-            transform: cgmath::Matrix4::identity(),
-            custom_set: None,
-            custom_id: 0,
-            uncullable: false,
-        };
 
+        let suzanne_mesh = Arc::new(suzanne_mesh);
         let s = 10;
         for x in -s..s {
             for y in -s..s {
                 for z in -s..s {
-                    suzanne.transform = cgmath::Matrix4::from_translation(cgmath::Vector3::new(
+                    let transform = cgmath::Matrix4::from_translation(cgmath::Vector3::new(
                         x as f32,
                         y as f32 - 15.0,
                         z as f32,
                     )) * cgmath::Matrix4::from_scale(1.5);
-                    renderables.push(suzanne.clone());
+                    renderables.push(OwnedEntity {
+                        mesh: suzanne_mesh.clone(),
+                        transform,
+                        material: Material {
+                            custom_set: None,
+                            pipeline: rgb_pipeline.clone(),
+                        },
+                    })
                 }
             }
         }
@@ -482,25 +253,24 @@ impl State {
             renderer.allocator().clone(),
             "./assets/lost_empire.obj".into(),
             renderer.transfer_context(),
-            renderer.device(),
         )
         .unwrap();
-        let empire = empire_meshes.into_iter().map(|mesh| Renderable {
+        let empire = empire_meshes.into_iter().map(|mesh| OwnedEntity {
             mesh: Arc::new(mesh),
-            pipeline: mesh_pipeline,
+            material: Material {
+                pipeline: mesh_pipeline.clone(),
+                custom_set: Some(texture.set.clone()),
+            },
             transform: cgmath::Matrix4::identity(),
-            custom_set: Some(texture.set.clone()),
-            custom_id: 0,
-            uncullable: false,
         });
 
-        let mut triangle = Renderable {
+        let mut triangle = OwnedEntity {
             mesh: Arc::new(triangle_mesh),
-            pipeline: mesh_pipeline,
+            material: Material {
+                pipeline: mesh_pipeline.clone(),
+                custom_set: Some(texture.set.clone()),
+            },
             transform: cgmath::Matrix4::from_scale(1.0),
-            custom_set: Some(texture.set.clone()),
-            custom_id: 0,
-            uncullable: false,
         };
         triangle.transform =
             cgmath::Matrix4::from_translation(cgmath::Vector3::new(-3.0, 0.0, 0.0))
@@ -516,19 +286,6 @@ impl State {
                 cgmath::Matrix4::from_translation(cgmath::Vector3::new(0.0, 0.0, 0.0));
             renderables.push(empire);
         }
-        let fov = 50.0 * std::f32::consts::PI / 180.0;
-        let near = 1.0;
-        let far = 20.0;
-        let aspect = 1.0;
-        let frustum_renderables = create_frustum_model(
-            &renderer,
-            far,
-            fov,
-            aspect,
-            near,
-            rgb_pipeline,
-            line_pipeline,
-        );
         let last_time = std::time::Instant::now();
         let input = Input::default();
         let camera = FirstPersonCamera::new(
@@ -538,17 +295,14 @@ impl State {
 
         let last_frame_times = VecDeque::new();
         let egui = EruptEgui::new(&mut renderer, frames_in_flight);
-        let workvec = Vec::new();
         let vsync = true;
         let egui_enabled = false;
         let start = std::time::Instant::now();
-        let frustum_transform = cgmath::Matrix4::<f32>::identity();
         Self {
             start,
             vsync,
             frames_in_flight,
             egui,
-            workvec,
             last_frame_times,
             renderables,
             renderer,
@@ -561,8 +315,6 @@ impl State {
             event_pump,
             egui_enabled,
             tx,
-            frustum_renderables,
-            frustum_transform,
         }
     }
     fn ui(&mut self) {
@@ -612,8 +364,7 @@ impl State {
                                 .color(egui::Color32::GREEN)
                                 .name("Prerender Processing"),
                             );
-                        })
-                        .response;
+                        });
                 });
             });
     }
@@ -680,15 +431,6 @@ impl State {
                     sdl2::keyboard::Keycode::C => {
                         self.egui_enabled = !self.egui_enabled;
                     }
-                    sdl2::keyboard::Keycode::R => {
-                        self.frustum_transform =
-                            cgmath::Matrix4::from_translation(self.camera.get_position())
-                                * cgmath::Matrix4::from_angle_y(cgmath::Rad(self.camera.yaw()))
-                                * cgmath::Matrix4::from_angle_x(-cgmath::Rad(self.camera.pitch()));
-                        for r in &mut self.frustum_renderables {
-                            r.transform = self.frustum_transform;
-                        }
-                    }
                     _ => {}
                 },
                 _ => {}
@@ -697,25 +439,27 @@ impl State {
         drop(window);
         self.ui();
         self.resize();
-        self.workvec.clear();
         /* let fov = 50.0 * std::f32::consts::PI / 180.0;
         let near = 1.0;
         let far = 20.0;
         let aspect = 1.0; */
         let frustum = create_frustum(fov, far, aspect, near);
-        self.workvec.extend(
+        if let Some((gpu_wait, cpu_work_time)) = self.renderer.render(
             self.renderables
                 .iter()
-                //.filter(|r| check_frustum(r, frustum, self.frustum_transform, near, far))
-                .cloned(),
-        );
-        self.workvec.extend(self.egui.renderables().iter().cloned());
-        self.workvec
-            .extend(self.frustum_renderables.iter().cloned());
-        if let Some((gpu_wait, cpu_work_time)) =
-            self.renderer
-                .render(&self.workvec, view_proj, frustum, self.camera.transform())
-        {
+                .map(|r| Renderable {
+                    transform: &r.transform,
+                    mesh: &r.mesh,
+                    custom_set: r.material.custom_set.as_ref(),
+                    custom_id: 0,
+                    uncullable: false,
+                    pipeline: &*r.material.pipeline,
+                })
+                .chain(self.egui.renderables()),
+            view_proj,
+            frustum,
+            self.camera.transform(),
+        ) {
             self.last_frame_times.push_back((
                 time,
                 dt,
@@ -727,35 +471,6 @@ impl State {
         self.last_time = now;
         true
     }
-}
-
-fn check_frustum(
-    r: &Renderable,
-    frustum: Frustum,
-    camera: cgmath::Matrix4<f32>,
-    near: f32,
-    far: f32,
-) -> bool {
-    let scale = r.transform.diagonal();
-    let scale = scale.x.max(scale.y).max(scale.z);
-    let radius = r.mesh.bounds.sphere_bounds * scale;
-
-    let center = r.transform * Vector4::new(0.0, 0.0, 0.0, 1.0);
-    let center_in_frustum_space = camera.invert().unwrap() * center;
-    let center_in_frustum_space = center_in_frustum_space.truncate();
-    let near_plane_position = Vector3::new(0.0, 0.0, near);
-    let far_plane_position = Vector3::new(0.0, 0.0, far);
-
-    (center_in_frustum_space - Vector3::new(0.0, 0.0, -radius) - near_plane_position)
-        .dot(frustum.near)
-        > 0.0
-        && (center_in_frustum_space + Vector3::new(0.0, 0.0, -radius) - far_plane_position)
-            .dot(frustum.far)
-            > 0.0
-        && (center_in_frustum_space + frustum.top * radius).dot(frustum.top) > 0.0
-        && (center_in_frustum_space + frustum.bottom * radius).dot(frustum.bottom) > 0.0
-        && (center_in_frustum_space + frustum.left * radius).dot(frustum.left) > 0.0
-        && (center_in_frustum_space + frustum.right * radius).dot(frustum.right) > 0.0
 }
 
 impl Drop for State {
@@ -792,16 +507,15 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
     let texture_set_layout = DescriptorSetLayout::from_shader(device, &frag_shader)
         .remove(&1)
         .unwrap();
+    let texture_set_layout = Arc::new(texture_set_layout);
 
     Box::new(move |args| {
-        let set_layouts = [&*args.global_set_layout, &texture_set_layout].map(|l| **l);
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
-            .set_layouts(&set_layouts)
-            .push_constant_ranges(&[]);
+        let set_layouts = vec![args.global_set_layout.clone(), texture_set_layout.clone()];
         let pipeline_layout = Arc::new(PipelineLayout::new(
             args.device.clone(),
-            &pipeline_layout_info,
-            label!("MeshPipelineLayout"),
+            set_layouts,
+            (),
+            &label!("MeshPipelineLayout"),
         ));
         let width = args.width;
         let height = args.height;
@@ -950,18 +664,12 @@ fn rgb_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
         let width = args.width;
         let height = args.height;
         let shader_stages = [&vert_shader, &frag_shader];
-        let set_layouts = vec![args.global_set_layout];
-        let set_layouts = set_layouts
-            .iter()
-            .map(|l| ****l)
-            .collect::<Vec<vk::DescriptorSetLayout>>();
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
-            .set_layouts(&set_layouts)
-            .push_constant_ranges(&[]);
+        let set_layouts = vec![args.global_set_layout.clone()];
         let pipeline_layout = Arc::new(PipelineLayout::new(
             args.device.clone(),
-            &pipeline_layout_info,
-            label!("RgbPipelineLayout"),
+            set_layouts,
+            (),
+            &label!("RgbPipelineLayout"),
         ));
         let view_port = vk::Viewport {
             x: 0.0,
@@ -1019,18 +727,12 @@ fn line_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
         let width = args.width;
         let height = args.height;
         let shader_stages = [&vert_shader, &frag_shader];
-        let set_layouts = vec![args.global_set_layout];
-        let set_layouts = set_layouts
-            .iter()
-            .map(|l| ****l)
-            .collect::<Vec<vk::DescriptorSetLayout>>();
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
-            .set_layouts(&set_layouts)
-            .push_constant_ranges(&[]);
+        let set_layouts = vec![args.global_set_layout.clone()];
         let pipeline_layout = Arc::new(PipelineLayout::new(
             args.device.clone(),
-            &pipeline_layout_info,
-            label!("LinePipelineLayout"),
+            set_layouts,
+            (),
+            &label!("LinePipelineLayout"),
         ));
         let view_port = vk::Viewport {
             x: 0.0,

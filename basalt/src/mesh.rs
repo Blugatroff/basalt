@@ -1,7 +1,6 @@
 use crate::buffer;
 use crate::handles::Allocator;
-use crate::handles::Device;
-use crate::utils::{immediate_submit, round_to};
+use crate::utils::round_to;
 use crate::TransferContext;
 use cgmath::InnerSpace;
 use erupt::vk;
@@ -121,7 +120,6 @@ impl Mesh {
         indices: &[u32],
         allocator: Arc<Allocator>,
         transfer_context: &TransferContext,
-        device: &Arc<Device>,
         host_visible: bool,
         name: String,
     ) -> Self {
@@ -132,7 +130,6 @@ impl Mesh {
             bounds,
             allocator,
             transfer_context,
-            device,
             host_visible,
             name,
         )
@@ -222,7 +219,6 @@ impl Mesh {
         bounds: Bounds,
         allocator: Arc<Allocator>,
         transfer_context: &TransferContext,
-        device: &Arc<Device>,
         host_visible: bool,
         name: String,
     ) -> Self {
@@ -248,7 +244,6 @@ impl Mesh {
             return mesh;
         }
         mesh.buffer = Arc::new(mesh.buffer.copy_to_device_local(
-            device,
             transfer_context,
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER,
         ));
@@ -258,7 +253,6 @@ impl Mesh {
         meshes: impl IntoIterator<Item = &'a mut Self>,
         allocator: Arc<Allocator>,
         transfer_context: &TransferContext,
-        device: &Arc<Device>,
     ) {
         let mut meshes = meshes.into_iter().collect::<Vec<&mut Self>>();
         if meshes.is_empty() {
@@ -289,7 +283,8 @@ impl Mesh {
             label!("CombineMeshesStagingBuffer"),
         ));
         let mut offset = 0;
-        immediate_submit(device, transfer_context, |cmd| unsafe {
+        let device = transfer_context.device.clone();
+        transfer_context.immediate_submit(|cmd| unsafe {
             for mesh in &mut meshes {
                 offset = round_to(offset, mesh.vertex_type_size as u64);
                 let region = vk::BufferCopyBuilder::new()
@@ -309,7 +304,6 @@ impl Mesh {
             }
         });
         let device_local_buffer = Arc::new(staging_buffer.copy_to_device_local(
-            device,
             transfer_context,
             vk::BufferUsageFlags::VERTEX_BUFFER
                 | vk::BufferUsageFlags::INDEX_BUFFER
@@ -331,7 +325,6 @@ impl Mesh {
         allocator: Arc<Allocator>,
         path: String,
         transfer_context: &TransferContext,
-        device: &Arc<Device>,
     ) -> Result<Vec<Self>, tobj::LoadError> {
         let (models, _) = tobj::load_obj(&path, &Self::obj_options())?;
         let mut meshes = models
@@ -372,13 +365,12 @@ impl Mesh {
                     &indices,
                     allocator.clone(),
                     transfer_context,
-                    device,
                     true,
                     name,
                 )
             })
             .collect::<Vec<_>>();
-        Self::combine_meshes(meshes.iter_mut(), allocator, transfer_context, device);
+        Self::combine_meshes(meshes.iter_mut(), allocator, transfer_context);
         Ok(meshes)
     }
 }

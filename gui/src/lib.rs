@@ -1,7 +1,8 @@
 use basalt::{
     buffer, image::Loader, label, vk, vk_mem_erupt, Allocator, ColorBlendAttachment,
     DepthStencilInfo, DescriptorSetLayout, InputAssemblyState, Mesh, MultiSamplingState, Pipeline,
-    PipelineDesc, PipelineLayout, RasterizationState, Renderable, Renderer, Sampler, ShaderModule,
+    PipelineDesc, PipelineHandle, PipelineLayout, RasterizationState, Renderable, Renderer,
+    Sampler, ShaderModule,
 };
 use egui::FontImage;
 use sdl2::event::Event;
@@ -121,8 +122,8 @@ impl basalt::Vertex for EguiVertex {
 pub struct EruptEgui {
     ctx: egui::CtxRef,
     raw_input: egui::RawInput,
-    pipeline: usize,
-    last_mesh: Vec<Renderable>,
+    pipeline: PipelineHandle,
+    last_meshes: Vec<(Arc<Mesh>, Arc<basalt::DescriptorSet>, cgmath::Matrix4<f32>)>,
     font_texture_version: u64,
     buffers: Vec<Arc<buffer::Allocated>>,
     frame: usize,
@@ -146,22 +147,21 @@ impl EruptEgui {
             vk::ShaderStageFlagBits::FRAGMENT,
         );
 
-        let texture_set_layout = DescriptorSetLayout::from_shader(app.device(), &frag_shader)
-            .remove(&1)
-            .unwrap();
+        let texture_set_layout = Arc::new(
+            DescriptorSetLayout::from_shader(app.device(), &frag_shader)
+                .remove(&1)
+                .unwrap(),
+        );
 
         let pipeline = app.register_pipeline(Box::new(move |params| {
             let width = params.width;
             let height = params.height;
             let shader_stages = [&vert_shader, &frag_shader];
-            let set_layouts = [&*params.global_set_layout, &texture_set_layout].map(|l| **l);
-            let pipeline_layout_info = vk::PipelineLayoutCreateInfoBuilder::new()
-                .set_layouts(&set_layouts)
-                .push_constant_ranges(&[]);
             let pipeline_layout = Arc::new(PipelineLayout::new(
                 params.device.clone(),
-                &pipeline_layout_info,
-                label!("EguiPipelineLayout"),
+                vec![params.global_set_layout.clone(), texture_set_layout.clone()],
+                (),
+                &label!("EguiPipelineLayout"),
             ));
             let view_port = vk::Viewport {
                 x: 0.0,
@@ -222,7 +222,7 @@ impl EruptEgui {
             ctx: egui::CtxRef::default(),
             raw_input: Self::default_input(),
             pipeline,
-            last_mesh: Vec::new(),
+            last_meshes: Vec::new(),
             font_texture_version: 0,
             buffers,
             frame: 0,
@@ -327,10 +327,19 @@ impl EruptEgui {
             return;
         }
         let clipped_meshes = self.ctx.tessellate(shapes);
-        self.last_mesh = self.draw(&clipped_meshes, renderer.allocator(), width, height);
+        self.last_meshes = self.draw(&clipped_meshes, renderer.allocator(), width, height);
     }
-    pub fn renderables(&self) -> &[Renderable] {
-        &self.last_mesh
+    pub fn renderables(&self) -> impl Iterator<Item = Renderable<'_>> {
+        self.last_meshes
+            .iter()
+            .map(|(mesh, custom_set, transform)| Renderable {
+                transform,
+                mesh,
+                custom_set: Some(&*custom_set),
+                custom_id: 0,
+                uncullable: true,
+                pipeline: &self.pipeline,
+            })
     }
     fn draw(
         &mut self,
@@ -338,7 +347,7 @@ impl EruptEgui {
         allocator: &Arc<Allocator>,
         width: f32,
         height: f32,
-    ) -> Vec<Renderable> {
+    ) -> Vec<(Arc<Mesh>, Arc<basalt::DescriptorSet>, cgmath::Matrix4<f32>)> {
         assert_eq!(
             std::mem::size_of::<EguiVertex>(),
             std::mem::size_of::<egui::epaint::Vertex>()
@@ -414,14 +423,15 @@ impl EruptEgui {
                     - offset % std::mem::size_of::<egui::epaint::Vertex>();
                 assert_eq!(offset % std::mem::size_of::<egui::epaint::Vertex>(), 0);
                 let mesh = Arc::new(mesh);
-                meshes.push(Renderable {
+                /* meshes.push(Renderable {
                     mesh,
                     pipeline: self.pipeline,
                     transform,
                     custom_set: Some(texture),
                     custom_id: 0,
                     uncullable: true,
-                });
+                }); */
+                meshes.push((mesh.clone(), texture.clone(), transform))
             }
             break meshes;
         }

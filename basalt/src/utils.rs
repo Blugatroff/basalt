@@ -7,7 +7,7 @@ use crate::{
         DescriptorSet, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetManager,
     },
     handles::{Allocator, CommandPool, Framebuffer, ImageView, RenderPass, Swapchain},
-    TransferContext, LAYER_KHRONOS_VALIDATION,
+    LAYER_KHRONOS_VALIDATION,
 };
 use erupt::{vk, DeviceLoader, InstanceLoader};
 use std::{
@@ -699,40 +699,6 @@ pub fn create_renderables_buffer(allocator: Arc<Allocator>, max_objects: u64) ->
         erupt::vk1_0::MemoryPropertyFlags::default(),
         label!("RenderablesBuffer"),
     )
-}
-
-pub fn immediate_submit<F>(device: &Device, transfer_context: &TransferContext, f: F)
-where
-    F: FnOnce(vk::CommandBuffer),
-{
-    unsafe {
-        let fence = transfer_context.fence.lock().unwrap();
-        let command_pool = transfer_context.command_pool.lock().unwrap();
-        device.reset_fences(&[**fence]).unwrap();
-        let alloc_info = vk::CommandBufferAllocateInfoBuilder::new()
-            .command_buffer_count(1)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_pool(**command_pool);
-        let cmd = device.allocate_command_buffers(&alloc_info).unwrap()[0];
-        let begin_info = vk::CommandBufferBeginInfoBuilder::new()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        device.begin_command_buffer(cmd, &begin_info).unwrap();
-        f(cmd);
-        device.end_command_buffer(cmd).unwrap();
-        let cmds = &[cmd];
-        let submit_info = vk::SubmitInfoBuilder::new().command_buffers(cmds);
-        let queue = transfer_context.transfer_queue.lock().unwrap();
-        device
-            .queue_submit(**queue, &[submit_info], Some(**fence))
-            .unwrap();
-        drop(queue);
-        device
-            .wait_for_fences(&[**fence], true, 1_000_000_000)
-            .unwrap();
-        device.reset_command_pool(**command_pool, None).unwrap();
-        drop(command_pool);
-        drop(fence);
-    }
 }
 
 pub fn create_mesh_buffer(allocator: Arc<Allocator>, size: u64) -> buffer::Allocated {

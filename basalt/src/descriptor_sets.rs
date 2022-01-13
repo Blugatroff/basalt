@@ -189,10 +189,7 @@ impl DescriptorPoolInner {
         }
         let mut unique_bindings: Vec<(vk::DescriptorType, u32)> = self.pool_sizes.clone();
         'outer: for binding in bindings {
-            for (_, free) in unique_bindings
-                .iter_mut()
-                .filter(|(ty, _)| *ty == binding.ty)
-            {
+            if let Some((_, free)) = unique_bindings.iter_mut().find(|(ty, _)| *ty == binding.ty) {
                 if *free >= binding.count {
                     *free -= binding.count;
                     continue 'outer;
