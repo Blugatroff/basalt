@@ -94,7 +94,7 @@ unsafe extern "system" fn debug_callback(
     }
     if (message_severity.0 & vk::DebugUtilsMessageSeverityFlagBitsEXT::WARNING_EXT.0) != 0 {
         log::warn!("{}", msg);
-        panic!();
+        //panic!();
     }
     if (message_severity.0 & vk::DebugUtilsMessageSeverityFlagBitsEXT::ERROR_EXT.0) != 0 {
         log::error!("{}", msg);

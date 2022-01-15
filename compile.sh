@@ -3,11 +3,11 @@
 base=$(dirname "$0")
 
 function compile {
-    glslc -I ./shaders/ -g -O -fshader-stage=$2 $1 -o $1.spv
+    ~/Documents/shaderc/bin/glslc.exe -I ./shaders/ -g -O -fshader-stage=$2 $1 -o $1.spv
 }
 
-compile $base/shaders/rgb_triangle.vert vert
-compile $base/shaders/rgb_triangle.frag frag
+compile $base/shaders/color.vert vert
+compile $base/shaders/color.frag frag
 
 compile $base/shaders/mesh.vert vert
 compile $base/shaders/mesh.frag frag
