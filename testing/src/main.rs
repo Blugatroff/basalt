@@ -7,6 +7,7 @@ use basalt::{
 };
 use cgmath::{InnerSpace, SquareMatrix};
 use first_person_camera::FirstPersonCamera;
+use gui::egui;
 use gui::EruptEgui;
 use input::Input;
 use sdl2::{event::Event, EventPump};
