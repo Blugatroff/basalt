@@ -1275,16 +1275,13 @@ impl Renderer {
             log::warn!("{:#?}", res);
         }
     }
-    pub fn render<'a, 'r>(
-        &'r mut self,
+    pub fn render<'a>(
+        &mut self,
         renderables: impl Iterator<Item = Renderable<'a>>,
         view_proj: Matrix4<f32>,
         frustum: Frustum,
         camera_transform: Matrix4<f32>,
-    ) -> Option<(std::time::Duration, std::time::Duration)>
-    where
-        'r: 'a,
-    {
+    ) -> Option<(std::time::Duration, std::time::Duration)> {
         self.frame_number += 1;
         if self.resize(self.width, self.height, self.frames_in_flight, self.vsync) {
             return None;

@@ -8,6 +8,8 @@ use egui::FontImage;
 use sdl2::event::Event;
 use std::sync::Arc;
 
+pub use egui;
+
 enum KeyOrEvent {
     Key(egui::Key),
     Event(egui::Event),

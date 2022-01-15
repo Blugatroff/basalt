@@ -195,6 +195,8 @@ impl DescriptorPoolInner {
                     continue 'outer;
                 }
                 return false;
+            } else {
+                return false;
             }
         }
         self.pool_sizes = unique_bindings;
