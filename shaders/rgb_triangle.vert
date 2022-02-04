@@ -3,12 +3,12 @@
 
 layout (location = 0) in vec3 vPosition;
 layout (location = 1) in vec3 vNormal;
-layout (location = 2) in vec3 vColor;
+layout (location = 2) in uint vColor;
 
 layout(location = 0) out vec3 color;
 
 void main() {
-  color = vColor;
+  color = unpackColor(vColor).xyz;
   uint index = objectBuffer.objects[gl_InstanceIndex].redirect;
   Object object = objectBuffer.objects[index];
 

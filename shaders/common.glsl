@@ -35,3 +35,10 @@ layout(std140, set = 0, binding = 1) /* readonly */ buffer ObjectBuffer {
 	Object objects[];
 } objectBuffer;
 
+vec4 unpackColor(uint c) {
+  uint r = (c & 0xFF000000) >> 24;
+  uint g = (c & 0x00FF0000) >> 16;
+  uint b = (c & 0x0000FF00) >> 8;
+  uint a = (c & 0x000000FF);
+  return vec4(r, g, b, a)  / 256.0;
+}

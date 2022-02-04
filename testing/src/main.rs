@@ -133,7 +133,6 @@ impl State {
             .unwrap_or_else(String::new)
             .parse::<u32>()
             .unwrap_or(0);
-
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         {
             let device = renderer.device().clone();
@@ -192,9 +191,9 @@ impl State {
                 }
             });
         }
+        let _line_pipeline = Arc::new(renderer.register_pipeline(line_pipeline(renderer.device())));
         let rgb_pipeline = Arc::new(renderer.register_pipeline(rgb_pipeline(renderer.device())));
         let mesh_pipeline = Arc::new(renderer.register_pipeline(mesh_pipeline(renderer.device())));
-        let _line_pipeline = Arc::new(renderer.register_pipeline(line_pipeline(renderer.device())));
         let mut triangle_mesh = Mesh::new(
             &vertices,
             &[0, 1, 2, 2, 1, 0],
@@ -566,7 +565,7 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
 struct ColorVertex {
     position: cgmath::Vector3<f32>,
     normal: cgmath::Vector3<f32>,
-    color: [u8; 3],
+    color: [u8; 4],
 }
 
 impl Vertex for ColorVertex {
@@ -592,7 +591,7 @@ impl Vertex for ColorVertex {
             vk::VertexInputAttributeDescriptionBuilder::new()
                 .binding(0)
                 .location(2)
-                .format(vk::Format::R8G8B8_UNORM)
+                .format(vk::Format::R32_UINT)
                 .offset(std::mem::size_of::<[f32; 6]>().try_into().unwrap()),
         ];
         VertexInfoDescription {
@@ -608,6 +607,7 @@ impl Vertex for ColorVertex {
                 (v.normal.x * 256.0) as u8,
                 (v.normal.y * 256.0) as u8,
                 (v.normal.z * 256.0) as u8,
+                0,
             ]),
         }
     }
@@ -616,7 +616,7 @@ impl Vertex for ColorVertex {
 #[allow(dead_code)]
 struct LineVertex {
     position: cgmath::Vector3<f32>,
-    color: [u8; 3],
+    color: [u8; 4],
 }
 
 impl Vertex for LineVertex {
@@ -637,7 +637,7 @@ impl Vertex for LineVertex {
             vk::VertexInputAttributeDescriptionBuilder::new()
                 .binding(0)
                 .location(1)
-                .format(vk::Format::R8G8B8_UNORM)
+                .format(vk::Format::R32_UINT)
                 .offset(std::mem::size_of::<[f32; 3]>().try_into().unwrap()),
         ];
         VertexInfoDescription {

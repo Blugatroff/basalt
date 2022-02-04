@@ -40,6 +40,7 @@ pub trait MyInto<T> {
     fn my_into(self) -> T;
 }
 
+#[derive(Debug)]
 pub struct ShaderModule {
     module: vk::ShaderModule,
     device: Arc<Device>,
@@ -204,7 +205,7 @@ impl Drop for Instance {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PipelineDesc<'a> {
     pub view_port: vk::Viewport,
     pub scissor: vk::Rect2DBuilder<'a>,
