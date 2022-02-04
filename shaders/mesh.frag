@@ -1,10 +1,9 @@
 #version 460
 #include <common.glsl>
 
-layout (location = 0) in vec3 vPosition;
-layout (location = 1) in vec3 vNormal;
-layout (location = 2) in vec2 vUv;
-layout (location = 3) in flat uint texId;
+layout (location = 0) in vec3 vNormal;
+layout (location = 1) in vec2 vUv;
+//layout (location = 2) in flat uint texId;
 
 layout (location = 0) out vec4 outFragColor;
 layout(set = 1, binding = 0) uniform sampler2D tex;

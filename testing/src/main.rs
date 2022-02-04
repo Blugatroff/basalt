@@ -192,7 +192,7 @@ impl State {
             });
         }
         let _line_pipeline = Arc::new(renderer.register_pipeline(line_pipeline(renderer.device())));
-        let rgb_pipeline = Arc::new(renderer.register_pipeline(rgb_pipeline(renderer.device())));
+        let rgb_pipeline = Arc::new(renderer.register_pipeline(color_pipeline(renderer.device())));
         let mesh_pipeline = Arc::new(renderer.register_pipeline(mesh_pipeline(renderer.device())));
         let mut triangle_mesh = Mesh::new(
             &vertices,
@@ -564,7 +564,6 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
 #[allow(dead_code)]
 struct ColorVertex {
     position: cgmath::Vector3<f32>,
-    normal: cgmath::Vector3<f32>,
     color: [u8; 4],
 }
 
@@ -586,13 +585,8 @@ impl Vertex for ColorVertex {
             vk::VertexInputAttributeDescriptionBuilder::new()
                 .binding(0)
                 .location(1)
-                .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(std::mem::size_of::<[f32; 3]>().try_into().unwrap()),
-            vk::VertexInputAttributeDescriptionBuilder::new()
-                .binding(0)
-                .location(2)
                 .format(vk::Format::R32_UINT)
-                .offset(std::mem::size_of::<[f32; 6]>().try_into().unwrap()),
+                .offset(std::mem::size_of::<[f32; 3]>().try_into().unwrap()),
         ];
         VertexInfoDescription {
             bindings,
@@ -602,7 +596,6 @@ impl Vertex for ColorVertex {
     fn new(v: basalt::LoadingVertex) -> Self {
         Self {
             position: v.position,
-            normal: v.normal,
             color: v.color.map(|a| a[0..3].try_into().unwrap()).unwrap_or([
                 (v.normal.x * 256.0) as u8,
                 (v.normal.y * 256.0) as u8,
@@ -647,16 +640,16 @@ impl Vertex for LineVertex {
     }
 }
 
-fn rgb_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
+fn color_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
     let frag_shader = ShaderModule::new(
         device.clone(),
-        include_bytes!("../../shaders/rgb_triangle.frag.spv"),
+        include_bytes!("../../shaders/color.frag.spv"),
         String::from(label!("RgbPipelineFragmentShader")),
         vk::ShaderStageFlagBits::FRAGMENT,
     );
     let vert_shader = ShaderModule::new(
         device.clone(),
-        include_bytes!("../../shaders/rgb_triangle.vert.spv"),
+        include_bytes!("../../shaders/color.vert.spv"),
         String::from("RgbPipelineVertexShader"),
         vk::ShaderStageFlagBits::VERTEX,
     );
