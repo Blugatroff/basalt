@@ -15,9 +15,12 @@ pub struct VertexInfoDescription {
 
 impl VertexInfoDescription {
     pub fn builder(&self) -> vk::PipelineVertexInputStateCreateInfoBuilder {
+        assert!(!self.bindings.is_empty());
+        assert!(!self.attributes.is_empty());
         vk::PipelineVertexInputStateCreateInfoBuilder::new()
             .vertex_binding_descriptions(&self.bindings)
             .vertex_attribute_descriptions(&self.attributes)
+            .flags(Default::default())
     }
 }
 

@@ -64,7 +64,7 @@ use crate::utils::create_sync_objects;
 use erupt::cstr;
 use frame::FrameData;
 use frame::Frames;
-use handles::{Fence, Framebuffer, ImageView, Instance, RenderPass, Surface, Swapchain};
+use handles::{Fence, ImageView, Instance, RenderPass, Surface, Swapchain};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Mutex;
@@ -250,7 +250,6 @@ pub struct Renderer {
     messenger: Option<DebugUtilsMessenger>,
     descriptor_set_manager: Arc<DescriptorSetManager>,
     command_pool: CommandPool,
-    frame_buffers: Vec<Framebuffer>,
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<ImageView>,
     render_pass: RenderPass,
@@ -367,9 +366,14 @@ impl Renderer {
         };
 
         let allocator = Arc::new(Allocator::new(device.clone(), &allocator_info));
-        let depth_images = create_depth_images(&allocator, width, height, frames_in_flight);
+        let depth_images: Vec<Arc<image::Allocated>> =
+            create_depth_images(&allocator, width, height, frames_in_flight)
+                .into_iter()
+                .map(Arc::new)
+                .collect();
+        let descriptor_set_manager = Arc::new(DescriptorSetManager::new(device.clone()));
         let depth_image_views = create_depth_image_views(&device, &depth_images);
-        let frame_buffers = create_framebuffers(
+        let framebuffers = create_framebuffers(
             &device,
             width,
             height,
@@ -377,7 +381,6 @@ impl Renderer {
             &swapchain_image_views,
             &depth_image_views,
         );
-
         let frame_number = 0;
         let start = std::time::Instant::now();
         let uniform_buffer = create_uniform_buffer(
@@ -418,7 +421,6 @@ impl Renderer {
             .address_mode_v(address_mode)
             .address_mode_w(address_mode);
         let sampler = Sampler::new(device.clone(), &sampler, label!());
-        let descriptor_set_manager = Arc::new(DescriptorSetManager::new(device.clone()));
         let descriptor_sets = (0..frames_in_flight)
             .map(|i| {
                 create_descriptor_sets(
@@ -481,13 +483,11 @@ impl Renderer {
             )
             .collect::<Vec<_>>();
         let cleanup = (0..frames_in_flight).map(|_| None).collect();
-
         let frames = Frames {
             present_semaphores,
             render_fences,
             render_semaphores,
             command_buffers,
-            depth_images,
             depth_image_views,
             descriptor_sets,
             renderables_buffers,
@@ -496,6 +496,7 @@ impl Renderer {
             cull_sets,
             cleanup,
             indirect_buffers,
+            framebuffers,
         };
         let materials = HashMap::new();
         let materials = Arc::new(Mutex::new(materials));
@@ -572,7 +573,6 @@ impl Renderer {
             messenger,
             descriptor_set_manager,
             command_pool,
-            frame_buffers,
             swapchain_images,
             swapchain_image_views,
             render_pass,
@@ -755,15 +755,17 @@ impl Renderer {
         self.swapchain_images = swapchain_images;
         self.swapchain_image_views = swapchain_image_views;
         self.render_pass = create_render_pass(self.device.clone(), self.format);
-        self.frames.depth_images = create_depth_images(
+        let depth_images: Vec<Arc<image::Allocated>> = create_depth_images(
             &self.allocator,
             self.width,
             self.height,
             self.frames_in_flight,
-        );
-        self.frames.depth_image_views =
-            create_depth_image_views(&self.device, &self.frames.depth_images);
-        self.frame_buffers = create_framebuffers(
+        )
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+        self.frames.depth_image_views = create_depth_image_views(&self.device, &depth_images);
+        self.frames.framebuffers = create_framebuffers(
             &self.device,
             self.width,
             self.height,
@@ -1113,7 +1115,7 @@ impl Renderer {
                         height: self.height,
                     },
                 })
-                .framebuffer(*self.frame_buffers[swapchain_image_index]);
+                .framebuffer(*self.frames.framebuffers[swapchain_image_index]);
             self.device
                 .cmd_begin_render_pass(cmd, &rp_begin_info, vk::SubpassContents::INLINE);
         }

@@ -3,7 +3,7 @@
 base=$(dirname "$0")
 
 function compile {
-    ~/Documents/shaderc/bin/glslc.exe -I ./shaders/ -g -O -fshader-stage=$2 $1 -o $1.spv
+    glslc -I ./shaders/ -g -O -fshader-stage=$2 $1 -o $1.spv
 }
 
 compile $base/shaders/color.vert vert

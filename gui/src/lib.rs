@@ -1,8 +1,10 @@
 use basalt::{
-    buffer, image::Loader, label, vk, vk_mem_erupt, Allocator, ColorBlendAttachment,
-    DepthStencilInfo, DescriptorSetLayout, InputAssemblyState, Mesh, MultiSamplingState, Pipeline,
-    PipelineDesc, PipelineHandle, PipelineLayout, RasterizationState, Renderable, Renderer,
-    Sampler, ShaderModule,
+    buffer,
+    image::{Loader, Texture},
+    label, vk, vk_mem_erupt, Allocator, ColorBlendAttachment, DepthStencilInfo,
+    DescriptorSetLayout, InputAssemblyState, Mesh, MultiSamplingState, Pipeline, PipelineDesc,
+    PipelineHandle, PipelineLayout, RasterizationState, Renderable, Renderer, Sampler,
+    ShaderModule,
 };
 use egui::FontImage;
 use sdl2::event::Event;
@@ -132,6 +134,7 @@ pub struct EruptEgui {
     texture: Option<Arc<basalt::image::Texture>>,
     sampler: Arc<Sampler>,
     allocator: Arc<Allocator>,
+    user_textures: slab::Slab<Arc<basalt::image::Texture>>,
 }
 impl EruptEgui {
     #[allow(clippy::missing_panics_doc)]
@@ -220,6 +223,7 @@ impl EruptEgui {
             &sampler,
             label!("EguiSampler"),
         ));
+        let user_textures = slab::Slab::new();
         Self {
             ctx: egui::CtxRef::default(),
             raw_input: Self::default_input(),
@@ -231,6 +235,7 @@ impl EruptEgui {
             texture: None,
             sampler,
             allocator: app.allocator().clone(),
+            user_textures,
         }
     }
     fn create_buffer(allocator: Arc<Allocator>) -> buffer::Allocated {
@@ -371,7 +376,7 @@ impl EruptEgui {
                 let egui::ClippedMesh(rect, mesh) = mesh;
                 let texture = match mesh.texture_id {
                     egui::TextureId::Egui => font_texture.clone(),
-                    egui::TextureId::User(_id) => todo!(),
+                    egui::TextureId::User(id) => self.user_textures[id as usize].set.clone(),
                 };
                 let min = cgmath::Vector3::new(rect.min.x, rect.min.y, 0.0);
                 let max = cgmath::Vector3::new(rect.max.x, rect.max.y, 0.0);
@@ -425,18 +430,14 @@ impl EruptEgui {
                     - offset % std::mem::size_of::<egui::epaint::Vertex>();
                 assert_eq!(offset % std::mem::size_of::<egui::epaint::Vertex>(), 0);
                 let mesh = Arc::new(mesh);
-                /* meshes.push(Renderable {
-                    mesh,
-                    pipeline: self.pipeline,
-                    transform,
-                    custom_set: Some(texture),
-                    custom_id: 0,
-                    uncullable: true,
-                }); */
                 meshes.push((mesh.clone(), texture.clone(), transform))
             }
             break meshes;
         }
+    }
+    pub fn load_texture(&mut self, texture: Arc<Texture>) -> egui::TextureId {
+        let id = self.user_textures.insert(texture) as u64;
+        egui::TextureId::User(id)
     }
     fn update_modifiers(&mut self, keymod: &sdl2::keyboard::Mod) -> &egui::Modifiers {
         self.raw_input.modifiers = egui::Modifiers {

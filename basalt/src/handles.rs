@@ -648,13 +648,49 @@ impl Drop for Queue {
     }
 }
 
-handle!(
-    ImageView,
-    vk::ImageView,
-    vk::ImageViewCreateInfoBuilder,
-    |device: &Arc<Device>, info| unsafe { device.create_image_view(info, None).unwrap() },
-    |device: &Arc<Device>, inner| unsafe { device.destroy_image_view(Some(inner), None) }
-);
+pub struct ImageView {
+    inner: vk::ImageView,
+    device: Arc<Device>,
+    image: Option<Arc<crate::image::Allocated>>,
+    name: String,
+}
+
+impl std::ops::Deref for ImageView {
+    type Target = vk::ImageView;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl ImageView {
+    pub fn new(
+        device: Arc<Device>,
+        info: &vk::ImageViewCreateInfoBuilder,
+        image: Option<Arc<crate::image::Allocated>>,
+        name: impl Into<String>,
+    ) -> Self {
+        let inner = unsafe { device.create_image_view(info, None).unwrap() };
+        let name = name.into();
+        crate::utils::log_resource_created("ImageView", &name);
+        Self {
+            inner,
+            device,
+            image,
+            name,
+        }
+    }
+}
+
+impl Drop for ImageView {
+    fn drop(&mut self) {
+        unsafe {
+            crate::utils::log_resource_dropped("ImageView", &self.name);
+            self.device.destroy_image_view(Some(self.inner), None);
+        }
+        drop(self.image.take());
+    }
+}
 
 handle!(
     Swapchain,

@@ -3,8 +3,7 @@ use std::sync::Arc;
 use crate::{
     buffer,
     descriptor_sets::DescriptorSet,
-    handles::{Fence, ImageView, Semaphore},
-    image,
+    handles::{Fence, Framebuffer, ImageView, Semaphore},
 };
 use erupt::vk;
 
@@ -13,7 +12,6 @@ pub struct Frames {
     pub render_fences: Vec<Fence>,
     pub render_semaphores: Vec<Semaphore>,
     pub command_buffers: Vec<vk::CommandBuffer>,
-    pub depth_images: Vec<image::Allocated>,
     pub depth_image_views: Vec<ImageView>,
     pub descriptor_sets: Vec<DescriptorSet>,
     pub renderables_buffers: Vec<buffer::Allocated>,
@@ -22,6 +20,7 @@ pub struct Frames {
     pub cull_sets: Vec<DescriptorSet>,
     pub cleanup: Vec<Option<Box<dyn FnOnce()>>>,
     pub indirect_buffers: Vec<Arc<buffer::Allocated>>,
+    pub framebuffers: Vec<Framebuffer>,
 }
 
 #[allow(clippy::module_name_repetitions)]
@@ -30,7 +29,6 @@ pub struct FrameData<'a> {
     pub render_fence: &'a Fence,
     pub render_semaphore: &'a Semaphore,
     pub command_buffer: &'a vk::CommandBuffer,
-    pub depth_image: &'a image::Allocated,
     pub depth_image_view: &'a ImageView,
     pub descriptor_set: &'a DescriptorSet,
     pub renderables_buffer: &'a buffer::Allocated,
@@ -39,6 +37,7 @@ pub struct FrameData<'a> {
     pub cull_set: &'a DescriptorSet,
     pub cleanup: &'a Option<Box<dyn FnOnce()>>,
     pub indirect_buffer: &'a Arc<buffer::Allocated>,
+    pub framebuffer: &'a Framebuffer,
 }
 
 impl<'a> FrameDataMut<'a> {
@@ -48,7 +47,6 @@ impl<'a> FrameDataMut<'a> {
             render_fence: self.render_fence,
             render_semaphore: self.render_semaphore,
             command_buffer: self.command_buffer,
-            depth_image: self.depth_image,
             depth_image_view: self.depth_image_view,
             descriptor_set: self.descriptor_set,
             renderables_buffer: self.renderables_buffer,
@@ -57,6 +55,7 @@ impl<'a> FrameDataMut<'a> {
             cull_set: self.cull_set,
             cleanup: self.cleanup,
             indirect_buffer: self.indirect_buffer,
+            framebuffer: self.framebuffer,
         }
     }
 }
@@ -67,7 +66,6 @@ pub struct FrameDataMut<'a> {
     pub render_fence: &'a Fence,
     pub render_semaphore: &'a Semaphore,
     pub command_buffer: &'a vk::CommandBuffer,
-    pub depth_image: &'a image::Allocated,
     pub depth_image_view: &'a ImageView,
     pub descriptor_set: &'a mut DescriptorSet,
     pub renderables_buffer: &'a mut buffer::Allocated,
@@ -76,6 +74,7 @@ pub struct FrameDataMut<'a> {
     pub cull_set: &'a mut DescriptorSet,
     pub cleanup: &'a mut Option<Box<dyn FnOnce()>>,
     pub indirect_buffer: &'a mut Arc<buffer::Allocated>,
+    pub framebuffer: &'a mut Framebuffer,
 }
 
 impl Frames {
@@ -85,7 +84,6 @@ impl Frames {
             render_fence: &self.render_fences[index],
             render_semaphore: &self.render_semaphores[index],
             command_buffer: &self.command_buffers[index],
-            depth_image: &self.depth_images[index],
             depth_image_view: &self.depth_image_views[index],
             descriptor_set: &self.descriptor_sets[index],
             renderables_buffer: &self.renderables_buffers[index],
@@ -94,6 +92,7 @@ impl Frames {
             cull_set: &self.cull_sets[index],
             cleanup: &self.cleanup[index],
             indirect_buffer: &self.indirect_buffers[index],
+            framebuffer: &self.framebuffers[index],
         }
     }
     pub fn get_mut(&mut self, index: usize) -> FrameDataMut {
@@ -102,7 +101,6 @@ impl Frames {
             render_fence: &self.render_fences[index],
             render_semaphore: &self.render_semaphores[index],
             command_buffer: &self.command_buffers[index],
-            depth_image: &self.depth_images[index],
             depth_image_view: &self.depth_image_views[index],
             descriptor_set: &mut self.descriptor_sets[index],
             renderables_buffer: &mut self.renderables_buffers[index],
@@ -111,6 +109,7 @@ impl Frames {
             cull_set: &mut self.cull_sets[index],
             cleanup: &mut self.cleanup[index],
             indirect_buffer: &mut self.indirect_buffers[index],
+            framebuffer: &mut self.framebuffers[index],
         }
     }
 }

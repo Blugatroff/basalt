@@ -53,8 +53,8 @@ impl Allocated {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
     }
     pub fn image_view_create_info<'a>(
+        &self,
         format: vk::Format,
-        image: vk::Image,
         aspect: vk::ImageAspectFlags,
     ) -> vk::ImageViewCreateInfoBuilder<'a> {
         let subresource_range = vk::ImageSubresourceRangeBuilder::new()
@@ -65,7 +65,7 @@ impl Allocated {
             .aspect_mask(aspect);
         vk::ImageViewCreateInfoBuilder::new()
             .view_type(vk::ImageViewType::_2D)
-            .image(image)
+            .image(**self)
             .format(format)
             .subresource_range(*subresource_range)
     }
@@ -231,30 +231,18 @@ impl Drop for Allocated {
 }
 
 pub struct Texture {
-    pub image: Arc<Allocated>,
     pub view: Arc<ImageView>,
     pub set: Arc<DescriptorSet>,
     pub sampler: Arc<Sampler>,
 }
 
 impl Texture {
-    pub fn new(
+    pub fn from_image_view(
         device: &Arc<Device>,
         descriptor_set_manager: &DescriptorSetManager,
-        image: Allocated,
+        view: Arc<ImageView>,
         sampler: Arc<Sampler>,
     ) -> Self {
-        let image = Arc::new(image);
-        let image_view_create_info = Allocated::image_view_create_info(
-            vk::Format::R8G8B8A8_SRGB,
-            **image,
-            vk::ImageAspectFlags::COLOR,
-        );
-        let view = Arc::new(ImageView::new(
-            device.clone(),
-            &image_view_create_info,
-            label!("TextureImageView"),
-        ));
         let texture_set_layout = DescriptorSetLayout::new(
             device.clone(),
             vec![descriptor_sets::DescriptorSetLayoutBinding {
@@ -278,15 +266,26 @@ impl Texture {
             .dst_set(*set)
             .image_info(image_info);
         unsafe { device.update_descriptor_sets(&[image_write], &[]) };
-        set.attach_resources(Box::new(Arc::clone(&image)));
         set.attach_resources(Box::new(Arc::clone(&view)));
         set.attach_resources(Box::new(Arc::clone(&sampler)));
         let set = Arc::new(set);
-        Self {
-            image,
-            view,
-            set,
-            sampler,
-        }
+        Self { view, set, sampler }
+    }
+    pub fn new(
+        device: &Arc<Device>,
+        descriptor_set_manager: &DescriptorSetManager,
+        image: Allocated,
+        sampler: Arc<Sampler>,
+    ) -> Self {
+        let image = Arc::new(image);
+        let image_view_create_info =
+            image.image_view_create_info(vk::Format::R8G8B8A8_SRGB, vk::ImageAspectFlags::COLOR);
+        let view = Arc::new(ImageView::new(
+            device.clone(),
+            &image_view_create_info,
+            Some(image.clone()),
+            label!("TextureImageView"),
+        ));
+        Self::from_image_view(device, descriptor_set_manager, view, sampler)
     }
 }

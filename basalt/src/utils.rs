@@ -286,17 +286,19 @@ pub fn create_depth_images(
 }
 pub fn create_depth_image_views(
     device: &Arc<Device>,
-    images: &[image::Allocated],
+    images: &[Arc<image::Allocated>],
 ) -> Vec<ImageView> {
     images
         .iter()
         .map(|image| {
-            let info = image::Allocated::image_view_create_info(
-                vk::Format::D32_SFLOAT,
-                **image,
-                vk::ImageAspectFlags::DEPTH,
-            );
-            ImageView::new(device.clone(), &info, label!("DepthImageView"))
+            let info =
+                image.image_view_create_info(vk::Format::D32_SFLOAT, vk::ImageAspectFlags::DEPTH);
+            ImageView::new(
+                device.clone(),
+                &info,
+                Some(image.clone()),
+                label!("DepthImageView"),
+            )
         })
         .collect::<Vec<ImageView>>()
 }
@@ -448,9 +450,10 @@ pub fn create_swapchain(
         });
 
     let swapchain = Swapchain::new(device.clone(), &swapchain_info, label!());
-    let swapchain_images = unsafe { device.get_swapchain_images_khr(*swapchain, None) }
-        .unwrap()
-        .to_vec();
+    let swapchain_images: Vec<vk::Image> =
+        unsafe { device.get_swapchain_images_khr(*swapchain, None) }
+            .unwrap()
+            .to_vec();
 
     // https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Image_views
     let swapchain_image_views: Vec<_> = swapchain_images
@@ -478,6 +481,7 @@ pub fn create_swapchain(
             ImageView::new(
                 device.clone(),
                 &image_view_info,
+                None,
                 label!("SwapchainImageView"),
             )
         })

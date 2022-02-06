@@ -78,6 +78,7 @@ struct State {
     renderer: Renderer,
     egui_enabled: bool,
     tx: std::sync::mpsc::Sender<()>,
+    egui_test_texture: egui::TextureId,
 }
 
 #[derive(Clone)]
@@ -294,7 +295,8 @@ impl State {
         );
 
         let last_frame_times = VecDeque::new();
-        let egui = EruptEgui::new(&mut renderer, frames_in_flight);
+        let mut egui = EruptEgui::new(&mut renderer, frames_in_flight);
+        let egui_test_texture = egui.load_texture(texture);
         let vsync = true;
         let egui_enabled = false;
         let start = std::time::Instant::now();
@@ -315,6 +317,7 @@ impl State {
             event_pump,
             egui_enabled,
             tx,
+            egui_test_texture,
         }
     }
     fn ui(&mut self) {
@@ -331,7 +334,7 @@ impl State {
                     ui.label(format!("{}fps", 1.0 / dt));
                     ui.checkbox(&mut self.vsync, "Vsync");
                     ui.add(egui::Slider::new(&mut self.frames_in_flight, 1..=15));
-
+                    ui.image(self.egui_test_texture, [100.0, 100.0]);
                     egui::plot::Plot::new(0)
                         .legend(egui::plot::Legend::default())
                         .allow_drag(false)

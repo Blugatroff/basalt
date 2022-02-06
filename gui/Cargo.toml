@@ -9,3 +9,4 @@ basalt = { path = "../basalt/" }
 egui = "0.16.1"
 cgmath = "0.18"
 shaders = { path = "../shaders" }
+slab = "0.4"
