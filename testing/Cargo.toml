@@ -10,6 +10,7 @@ first-person-camera = { git = "https://github.com/Blugatroff/first-person-camera
 gui = { path = "../gui" }
 log = "0.4"
 pretty_env_logger = "0.4"
+puffin_egui = "0.13.0"
 
 [dependencies.sdl2]
 version = "0.35.1"

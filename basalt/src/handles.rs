@@ -485,6 +485,8 @@ impl Drop for Surface {
     }
 }
 
+pub type Trash = Arc<dyn std::any::Any + Send + Sync>;
+
 macro_rules! handle {
     ( $name:ident, $t:ty, $info:ty, $create:expr, $destroy:expr ) => {
         #[derive(Debug)]
@@ -492,6 +494,7 @@ macro_rules! handle {
             inner: $t,
             device: Arc<Device>,
             name: String,
+            trash: Option<Trash>,
         }
 
         impl $name {
@@ -503,7 +506,21 @@ macro_rules! handle {
                     inner,
                     device,
                     name,
+                    trash: None,
                 }
+            }
+            #[allow(dead_code)]
+            pub fn attach_trash<T: 'static + Send + Sync>(&mut self, trash: T) {
+                self.trash = Some(if let Some(old) = self.trash.take() {
+                    Arc::new((old, trash))
+                } else {
+                    Arc::new(trash)
+                })
+            }
+            #[allow(dead_code)]
+            pub fn with_trash(mut self, trash: Trash) -> Self {
+                self.attach_trash(trash);
+                self
             }
         }
 

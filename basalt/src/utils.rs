@@ -1,5 +1,5 @@
 use crate::buffer;
-use crate::handles::{Device, Fence, Instance, Queue, QueueFamily, Semaphore};
+use crate::handles::{Device, Fence, Instance, Queue, QueueFamily, Semaphore, Trash};
 use crate::image;
 use crate::{
     debug_callback,
@@ -10,6 +10,7 @@ use crate::{
     LAYER_KHRONOS_VALIDATION,
 };
 use erupt::{vk, DeviceLoader, InstanceLoader};
+use std::any::Any;
 use std::{
     ffi::{CStr, CString},
     sync::Arc,
@@ -118,6 +119,13 @@ pub fn create_global_descriptor_set_layout(device: Arc<Device>) -> DescriptorSet
                 count: 1,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
+                immutable_samplers: None,
+            },
+            DescriptorSetLayoutBinding {
+                binding: 2,
+                count: 1,
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                stage_flags: vk::ShaderStageFlags::FRAGMENT,
                 immutable_samplers: None,
             },
         ],
@@ -263,44 +271,41 @@ pub fn create_depth_images(
     width: u32,
     height: u32,
     frames_in_flight: usize,
-) -> Vec<image::Allocated> {
+) -> Vec<(image::Allocated, image::Allocated)> {
     let format = vk::Format::D32_SFLOAT;
-    let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+    let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED;
     let extent = vk::Extent3D {
         width,
         height,
         depth: 1,
     };
-    (0..frames_in_flight)
-        .map(|_| {
-            image::Allocated::new(
-                allocator.clone(),
-                format,
-                usage,
-                extent,
-                vk::ImageTiling::OPTIMAL,
-                label!("DepthImage").into(),
-            )
-        })
-        .collect()
+    let f = || {
+        image::Allocated::new(
+            allocator.clone(),
+            format,
+            usage,
+            extent,
+            vk::ImageTiling::OPTIMAL,
+            label!("DepthImage").into(),
+        )
+    };
+    (0..frames_in_flight).map(|_| (f(), f())).collect()
 }
-pub fn create_depth_image_views(
+pub fn create_depth_image_views<'a>(
     device: &Arc<Device>,
-    images: &[Arc<image::Allocated>],
-) -> Vec<ImageView> {
-    images
-        .iter()
-        .map(|image| {
-            let info =
-                image.image_view_create_info(vk::Format::D32_SFLOAT, vk::ImageAspectFlags::DEPTH);
-            ImageView::new(
-                device.clone(),
-                &info,
-                Some(image.clone()),
-                label!("DepthImageView"),
-            )
-        })
-        .collect::<Vec<ImageView>>()
+    images: impl IntoIterator<Item = &'a (Arc<image::Allocated>, Arc<image::Allocated>)>,
+) -> Vec<(ImageView, ImageView)> {
+    let f = |image: &Arc<image::Allocated>| {
+        let info =
+            image.image_view_create_info(vk::Format::D32_SFLOAT, vk::ImageAspectFlags::DEPTH);
+        ImageView::new(
+            device.clone(),
+            &info,
+            Some(image.clone()),
+            label!("DepthImageView"),
+        )
+    };
+    images.into_iter().map(|(a, b)| (f(a), f(b))).collect()
 }
 pub fn create_device_and_queue(
     instance: Arc<Instance>,
@@ -423,13 +428,16 @@ pub fn create_swapchain(
     device: &Arc<Device>,
     present_mode: vk::PresentModeKHR,
     old_swapchain: Option<vk::SwapchainKHR>,
-) -> (Swapchain, Vec<vk::Image>, Vec<ImageView>) {
+    swapchain_image_count: u32,
+) -> (Swapchain, Vec<vk::Image>, Vec<ImageView>, u32) {
     let surface_caps =
         unsafe { instance.get_physical_device_surface_capabilities_khr(physical_device, surface) }
             .unwrap();
-    let mut image_count = surface_caps.min_image_count + 1;
-    if surface_caps.max_image_count > 0 && image_count > surface_caps.max_image_count {
-        image_count = surface_caps.max_image_count;
+    dbg!((swapchain_image_count, surface_caps.min_image_count));
+    let mut image_count = swapchain_image_count.max(surface_caps.min_image_count);
+    let max_image_count = surface_caps.max_image_count;
+    if max_image_count > 0 && image_count > max_image_count {
+        image_count = max_image_count;
     }
     let swapchain_info = vk::SwapchainCreateInfoKHRBuilder::new()
         .surface(surface)
@@ -486,37 +494,64 @@ pub fn create_swapchain(
             )
         })
         .collect();
-    (swapchain, swapchain_images, swapchain_image_views)
+    (
+        swapchain,
+        swapchain_images,
+        swapchain_image_views,
+        max_image_count,
+    )
 }
-pub fn create_framebuffers(
+pub fn create_framebuffers<'a, I>(
     device: &Arc<Device>,
     width: u32,
     height: u32,
     render_pass: vk::RenderPass,
-    swapchain_image_views: &[ImageView],
-    depth_views: &[ImageView],
-) -> Vec<Framebuffer> {
-    let mut framebuffer_info = vk::FramebufferCreateInfoBuilder::new()
-        .render_pass(render_pass)
-        .width(width)
-        .height(height)
-        .layers(1);
+    swapchain_image_views: impl IntoIterator<Item = &'a Arc<ImageView>>,
+    depth_views: I,
+) -> Vec<(Framebuffer, Framebuffer)>
+where
+    I: IntoIterator<Item = &'a (Arc<ImageView>, Arc<ImageView>)>,
+    I::IntoIter: Clone,
+{
+    let depth_views = depth_views.into_iter().cycle();
+    let attachments: Vec<[([vk::ImageView; 2], Arc<dyn Any + Send + Sync>); 2]> =
+        swapchain_image_views
+            .into_iter()
+            .zip(depth_views)
+            .map(|(swapchain_image_view, (depth_view_1, depth_view_2))| {
+                [
+                    (
+                        [***swapchain_image_view, ***depth_view_1],
+                        Arc::new((swapchain_image_view.clone(), depth_view_1.clone())) as Trash,
+                    ),
+                    (
+                        [***swapchain_image_view, ***depth_view_2],
+                        Arc::new((swapchain_image_view.clone(), depth_view_2.clone())) as Trash,
+                    ),
+                ]
+            })
+            .collect::<Vec<[([vk::ImageView; 2], Trash); 2]>>();
 
-    let attachments = swapchain_image_views
-        .iter()
-        .zip(depth_views.iter().cycle())
-        .map(|(swapchain_image_view, depth_view)| [**swapchain_image_view, **depth_view])
-        .collect::<Vec<[vk::ImageView; 2]>>();
+    let f = |(attachments, trash): (&[vk::ImageView; 2], Trash)| {
+        let framebuffer_info = vk::FramebufferCreateInfoBuilder::new()
+            .render_pass(render_pass)
+            .width(width)
+            .height(height)
+            .layers(1)
+            .attachments(attachments);
+        Framebuffer::new(
+            device.clone(),
+            &framebuffer_info,
+            label!("SwapchainFrameBuffer"),
+        )
+        .with_trash(trash.clone())
+    };
 
     attachments
         .iter()
-        .map(|attachments| {
-            framebuffer_info = framebuffer_info.attachments(attachments);
-            Framebuffer::new(
-                device.clone(),
-                &framebuffer_info,
-                label!("SwapchainFrameBuffer"),
-            )
+        .map(|a: &[([vk::ImageView; 2], Trash); 2]| {
+            let [a, b]: &[([vk::ImageView; 2], Trash); 2] = a;
+            (f((&a.0, a.1.clone())), f((&b.0, b.1.clone())))
         })
         .collect::<Vec<_>>()
 }

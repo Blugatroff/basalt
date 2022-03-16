@@ -1,4 +1,5 @@
 mod input;
+use basalt::puffin;
 use basalt::{
     image, label, vk, ColorBlendAttachment, DefaultVertex, DepthStencilInfo, DescriptorSet,
     DescriptorSetLayout, Device, Frustum, InputAssemblyState, MaterialLoadFn, Mesh,
@@ -97,11 +98,12 @@ struct OwnedEntity {
 impl State {
     #[allow(clippy::too_many_lines)]
     pub fn new() -> Self {
+        puffin::set_scopes_on(true);
         let (sdl, window, event_pump) = create_window();
         let window = Arc::new(Mutex::new(window));
         sdl.mouse().set_relative_mouse_mode(true);
         let validation_layers = std::env::args().any(|s| s == "v");
-        let frames_in_flight = 3;
+        let frames_in_flight = 1;
         let mut renderer = Renderer::new(
             Arc::clone(&window),
             true,
@@ -321,10 +323,13 @@ impl State {
         }
     }
     fn ui(&mut self) {
+        puffin::profile_function!();
         let (width, height) = self.window.lock().unwrap().size();
+        let max_frames_in_flight = self.renderer.max_frames_in_flight() as usize;
         self.egui
             .run(&mut self.renderer, (width as f32, height as f32), |ctx| {
                 ctx.request_repaint();
+                puffin_egui::profiler_window(ctx);
                 egui::Window::new("Debug Window").show(ctx, |ui| {
                     let dt = self
                         .last_frame_times
@@ -333,7 +338,10 @@ impl State {
                     ui.label(format!("{}ms", dt * 1000.0));
                     ui.label(format!("{}fps", 1.0 / dt));
                     ui.checkbox(&mut self.vsync, "Vsync");
-                    ui.add(egui::Slider::new(&mut self.frames_in_flight, 1..=15));
+                    ui.add(egui::Slider::new(
+                        &mut self.frames_in_flight,
+                        1..=max_frames_in_flight,
+                    ));
                     ui.image(self.egui_test_texture, [100.0, 100.0]);
                     egui::plot::Plot::new(0)
                         .legend(egui::plot::Legend::default())
@@ -378,10 +386,12 @@ impl State {
             self.egui.adjust_frames_in_flight(self.frames_in_flight);
             assert_eq!(self.frames_in_flight, self.egui.frames_in_flight());
         }
+        dbg!(self.frames_in_flight);
         self.renderer
             .resize(width, height, self.frames_in_flight, self.vsync)
     }
     fn update(&mut self) -> bool {
+        puffin::profile_function!();
         let now = std::time::Instant::now();
         let dt = now - self.last_time;
         let dt = dt.as_secs_f32();
@@ -472,6 +482,7 @@ impl State {
         }
 
         self.last_time = now;
+        basalt::puffin::GlobalProfiler::lock().new_frame();
         true
     }
 }

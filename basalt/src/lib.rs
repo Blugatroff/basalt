@@ -50,6 +50,7 @@ pub mod buffer;
 pub mod image;
 pub use descriptor_sets::DescriptorSet;
 pub use mesh::LoadingVertex;
+pub use puffin;
 
 mod descriptor_sets;
 mod frame;
@@ -65,7 +66,6 @@ use erupt::cstr;
 use frame::FrameData;
 use frame::Frames;
 use handles::{Fence, ImageView, Instance, RenderPass, Surface, Swapchain};
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Mutex;
 use std::{
@@ -156,7 +156,7 @@ struct BatchingResult<'a> {
 
 pub type MaterialLoadFn = Box<dyn for<'a> Fn(PipelineCreationParams<'a>) -> Pipeline>;
 
-type PipelineStorage = HashMap<usize, (Arc<Pipeline>, MaterialLoadFn)>;
+type PipelineStorage = slab::Slab<(Arc<Pipeline>, MaterialLoadFn)>;
 
 pub struct PipelineHandle(Arc<Mutex<PipelineStorage>>, usize);
 
@@ -174,7 +174,7 @@ impl Debug for PipelineHandle {
 
 impl Drop for PipelineHandle {
     fn drop(&mut self) {
-        self.0.lock().unwrap().remove(&self.1);
+        drop(self.0.lock().unwrap().remove(self.key()));
     }
 }
 
@@ -234,7 +234,6 @@ pub struct Frustum {
     pub near_distance: f32,
 }
 
-#[allow(clippy::struct_excessive_bools)]
 pub struct Renderer {
     compute_pipeline: ComputePipeline,
     compute_set_layout: Arc<DescriptorSetLayout>,
@@ -242,6 +241,7 @@ pub struct Renderer {
     supported_present_modes: Vec<vk::PresentModeKHR>,
     present_mode: vk::PresentModeKHR,
     swapchain: Swapchain,
+    max_image_count: u32,
     sampler: Arc<Sampler>,
     width: u32,
     height: u32,
@@ -251,7 +251,7 @@ pub struct Renderer {
     descriptor_set_manager: Arc<DescriptorSetManager>,
     command_pool: CommandPool,
     swapchain_images: Vec<vk::Image>,
-    swapchain_image_views: Vec<ImageView>,
+    swapchain_image_views: Vec<Arc<ImageView>>,
     render_pass: RenderPass,
     frames: Frames,
     uniform_buffer: buffer::Allocated,
@@ -332,15 +332,19 @@ impl Renderer {
             physical_device,
         );
         let device = Arc::new(device);
-        let (swapchain, swapchain_images, swapchain_image_views) = create_swapchain(
-            &instance,
-            physical_device,
-            *surface,
-            format,
-            &device,
-            present_mode,
-            None,
-        );
+        let (swapchain, swapchain_images, swapchain_image_views, max_image_count) =
+            create_swapchain(
+                &instance,
+                physical_device,
+                *surface,
+                format,
+                &device,
+                present_mode,
+                None,
+                frames_in_flight as u32,
+            );
+        let swapchain_image_views: Vec<Arc<ImageView>> =
+            swapchain_image_views.into_iter().map(Arc::new).collect();
 
         let command_pool_info = vk::CommandPoolCreateInfoBuilder::new()
             .queue_family_index(graphics_family.0)
@@ -366,13 +370,17 @@ impl Renderer {
         };
 
         let allocator = Arc::new(Allocator::new(device.clone(), &allocator_info));
-        let depth_images: Vec<Arc<image::Allocated>> =
+        let depth_images: Vec<(Arc<image::Allocated>, Arc<image::Allocated>)> =
             create_depth_images(&allocator, width, height, frames_in_flight)
                 .into_iter()
-                .map(Arc::new)
+                .map(|(a, b)| (Arc::new(a), Arc::new(b)))
                 .collect();
         let descriptor_set_manager = Arc::new(DescriptorSetManager::new(device.clone()));
-        let depth_image_views = create_depth_image_views(&device, &depth_images);
+        let depth_image_views = create_depth_image_views(&device, &depth_images)
+            .into_iter()
+            .map(|(a, b)| (Arc::new(a), Arc::new(b)))
+            .collect();
+
         let framebuffers = create_framebuffers(
             &device,
             width,
@@ -482,7 +490,9 @@ impl Renderer {
                 },
             )
             .collect::<Vec<_>>();
+        let sampler = Arc::new(sampler);
         let cleanup = (0..frames_in_flight).map(|_| None).collect();
+
         let frames = Frames {
             present_semaphores,
             render_fences,
@@ -498,8 +508,7 @@ impl Renderer {
             indirect_buffers,
             framebuffers,
         };
-        let materials = HashMap::new();
-        let materials = Arc::new(Mutex::new(materials));
+        let materials = Default::default();
         let fence_info = vk::FenceCreateInfoBuilder::new().flags(vk::FenceCreateFlags::empty());
         let fence = Mutex::new(Fence::new(
             device.clone(),
@@ -536,7 +545,6 @@ impl Renderer {
             transfer_context: transfer_context.clone(),
             allocator: allocator.clone(),
         };
-        let sampler = Arc::new(sampler);
         drop(w);
         let cull_shader = ShaderModule::new(
             device.clone(),
@@ -569,6 +577,7 @@ impl Renderer {
             width,
             height,
             vsync,
+            max_image_count,
             graphics_queue,
             messenger,
             descriptor_set_manager,
@@ -632,13 +641,7 @@ impl Renderer {
     pub fn register_pipeline(&mut self, create_fn: MaterialLoadFn) -> PipelineHandle {
         let mut materials = self.materials.lock().unwrap();
         let material = Arc::new(create_fn(self.pipeline_creation_params()));
-        static mut K: usize = 0;
-        let mut k = unsafe { K };
-        while materials.get(&k).is_some() {
-            k += 1;
-        }
-        unsafe { K = k + 1 };
-        materials.insert(k, (material, create_fn));
+        let k = materials.insert((material, create_fn));
         PipelineHandle(self.materials.clone(), k)
     }
     fn set_present_mode(&mut self) {
@@ -667,6 +670,12 @@ impl Renderer {
         }
     }
     fn change_num_frames_in_flight(&mut self) {
+        if self.frames_in_flight > self.max_image_count as usize {
+            panic!(
+                "Cannot resize to {} frames in flight the maximum is: {}",
+                self.frames_in_flight, self.max_image_count
+            );
+        }
         let (render_fences, present_semaphores, render_semaphores) =
             create_sync_objects(&self.device, self.frames_in_flight);
         self.frames.render_fences = render_fences;
@@ -742,29 +751,37 @@ impl Renderer {
             .collect();
     }
     fn recreate_swapchain(&mut self) {
-        let (swapchain, swapchain_images, swapchain_image_views) = create_swapchain(
-            &self.instance,
-            self.physical_device,
-            *self.surface,
-            self.format,
-            &self.device,
-            self.present_mode,
-            Some(*self.swapchain),
-        );
+        let (swapchain, swapchain_images, swapchain_image_views, max_image_count) =
+            create_swapchain(
+                &self.instance,
+                self.physical_device,
+                *self.surface,
+                self.format,
+                &self.device,
+                self.present_mode,
+                Some(*self.swapchain),
+                self.frames_in_flight as u32,
+            );
+        let swapchain_image_views = swapchain_image_views.into_iter().map(Arc::new).collect();
+        self.max_image_count = max_image_count;
         self.swapchain = swapchain;
         self.swapchain_images = swapchain_images;
         self.swapchain_image_views = swapchain_image_views;
         self.render_pass = create_render_pass(self.device.clone(), self.format);
-        let depth_images: Vec<Arc<image::Allocated>> = create_depth_images(
-            &self.allocator,
-            self.width,
-            self.height,
-            self.frames_in_flight,
-        )
-        .into_iter()
-        .map(Arc::new)
-        .collect();
-        self.frames.depth_image_views = create_depth_image_views(&self.device, &depth_images);
+        let depth_images: Vec<(Arc<image::Allocated>, Arc<image::Allocated>)> =
+            create_depth_images(
+                &self.allocator,
+                self.width,
+                self.height,
+                self.frames_in_flight,
+            )
+            .into_iter()
+            .map(|(a, b)| (Arc::new(a), Arc::new(b)))
+            .collect();
+        self.frames.depth_image_views = create_depth_image_views(&self.device, &depth_images)
+            .into_iter()
+            .map(|(a, b)| (Arc::new(a), Arc::new(b)))
+            .collect();
         self.frames.framebuffers = create_framebuffers(
             &self.device,
             self.width,
@@ -772,13 +789,17 @@ impl Renderer {
             *self.render_pass,
             &self.swapchain_image_views,
             &self.frames.depth_image_views,
-        );
+        )
+        .into();
         self.reload_pipelines();
         self.frames.command_buffers = create_command_buffers(
             &self.device,
             &self.command_pool,
             self.frames_in_flight.try_into().unwrap(),
         );
+    }
+    pub fn max_frames_in_flight(&self) -> u32 {
+        self.max_image_count
     }
     /// returns whether a resize was necessary
     pub fn resize(
@@ -806,6 +827,7 @@ impl Renderer {
             self.change_num_frames_in_flight();
         }
         self.recreate_swapchain();
+        self.frames.check_valid();
         true
     }
     fn reload_pipelines(&mut self) {
@@ -885,7 +907,7 @@ impl Renderer {
                 custom_descriptor_sets.push(renderable.custom_set.map(Arc::clone));
             }
             if last_pipeline != this_pipeline {
-                let p = &materials.get(&renderable.pipeline.key()).unwrap().0;
+                let p = &materials.get(renderable.pipeline.key()).unwrap().0;
                 pipeline = Some(&**p);
                 pipelines.push(p.clone());
             }
@@ -966,6 +988,7 @@ impl Renderer {
         draws
     }
     fn write_renderables(buffer: &buffer::Allocated, instancing_batches: &[InstancingBatch]) {
+        puffin::profile_function!();
         let ptr = buffer.map().cast::<shaders::Object>() as *mut shaders::Object;
         let num_renderables = instancing_batches.iter().map(|b| b.renderables.len()).sum();
         let slice = unsafe { std::slice::from_raw_parts_mut(ptr, num_renderables) };
@@ -987,6 +1010,7 @@ impl Renderer {
         buffer.unmap();
     }
     fn write_meshes(buffer: &buffer::Allocated, meshes: &[Arc<Mesh>]) {
+        puffin::profile_function!();
         let ptr = buffer.map().cast::<shaders::Mesh>() as *mut shaders::Mesh;
         let slice = unsafe { std::slice::from_raw_parts_mut(ptr, meshes.len()) };
         for (i, mesh) in meshes.iter().enumerate() {
@@ -1000,6 +1024,7 @@ impl Renderer {
         buffer.unmap();
     }
     fn wait_for_next_frame(&mut self) -> (usize, frame::FrameDataMut) {
+        puffin::profile_function!();
         let frame_index = self.frame_number % self.frames_in_flight;
         let frame = self.frames.get_mut(frame_index);
         unsafe {
@@ -1057,6 +1082,7 @@ impl Renderer {
         swapchain: &Swapchain,
         frame: &FrameData,
     ) -> Option<usize> {
+        puffin::profile_function!();
         unsafe {
             let res = device.acquire_next_image_khr(
                 **swapchain,
@@ -1085,12 +1111,14 @@ impl Renderer {
         }
     }
     fn begin_render_pass(
-        &self,
-        frame: &FrameData,
+        &mut self,
+        frame_index: usize,
         swapchain_image_index: usize,
         clear_color: [f32; 4],
     ) -> vk::CommandBuffer {
+        let frame = self.frames.get(frame_index);
         let cmd = *frame.command_buffer;
+        let framebuffer = &self.frames.framebuffers[swapchain_image_index].0;
         unsafe {
             let clear_values = &[
                 vk::ClearValue {
@@ -1115,10 +1143,16 @@ impl Renderer {
                         height: self.height,
                     },
                 })
-                .framebuffer(*self.frames.framebuffers[swapchain_image_index]);
+                .framebuffer(**framebuffer);
             self.device
                 .cmd_begin_render_pass(cmd, &rp_begin_info, vk::SubpassContents::INLINE);
         }
+        fn flip<T>(t: &mut (T, T)) {
+            std::mem::swap(&mut t.0, &mut t.1)
+        }
+        let mut frame = self.frames.get_mut(frame_index);
+        flip(&mut frame.framebuffer);
+        //flip(&mut frame.depth_image_view);
         cmd
     }
     fn begin_command_buffer(&self, frame: &FrameData) {
@@ -1137,6 +1171,7 @@ impl Renderer {
         renderables_len: usize,
         global_uniform_offset: u32,
     ) {
+        puffin::profile_function!();
         let cmd = *frame.command_buffer;
         unsafe {
             self.device.cmd_fill_buffer(
@@ -1189,6 +1224,7 @@ impl Renderer {
         indirect_draws: &[IndirectDraw],
         cmd: vk::CommandBuffer,
     ) {
+        puffin::profile_function!();
         let frame = self.frames.get(frame_index);
         unsafe {
             for draw in indirect_draws {
@@ -1284,6 +1320,8 @@ impl Renderer {
         frustum: Frustum,
         camera_transform: Matrix4<f32>,
     ) -> Option<(std::time::Duration, std::time::Duration)> {
+        puffin::profile_function!();
+        self.frames.check_valid();
         self.frame_number += 1;
         if self.resize(self.width, self.height, self.frames_in_flight, self.vsync) {
             return None;
@@ -1340,7 +1378,7 @@ impl Renderer {
         let frame = self.frames.get(frame_index);
         self.begin_command_buffer(&frame);
         self.record_cull_dispatch(&frame, &batches, num_renderables, global_uniform_offset);
-        let cmd = self.begin_render_pass(&frame, swapchain_image_index, [0.15, 0.6, 0.9, 1.0]);
+        let cmd = self.begin_render_pass(frame_index, swapchain_image_index, [0.15, 0.6, 0.9, 1.0]);
         let indirect_draws = Self::batch_batches(&batches);
         self.record_draws(frame_index, global_uniform_offset, &indirect_draws, cmd);
         self.submit_cmd(frame_index, cmd);
@@ -1373,7 +1411,7 @@ impl Drop for Renderer {
             self.device.device_wait_idle().unwrap();
             drop(self.messenger.take());
             drop((guard_0, guard_1));
-            log::info!(label!("DROPPING App"));
+            log::info!(label!("DROPPING Renderer"));
         };
     }
 }
