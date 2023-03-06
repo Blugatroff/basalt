@@ -386,7 +386,6 @@ impl State {
             self.egui.adjust_frames_in_flight(self.frames_in_flight);
             assert_eq!(self.frames_in_flight, self.egui.frames_in_flight());
         }
-        dbg!(self.frames_in_flight);
         self.renderer
             .resize(width, height, self.frames_in_flight, self.vsync)
     }
