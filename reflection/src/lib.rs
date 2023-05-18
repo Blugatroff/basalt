@@ -112,14 +112,14 @@ pub enum Type {
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&match self {
-            Type::Vector(ty, n) => format!("::cgmath::Vector{}<{}>", n, ty),
-            Type::Scalar(ty) => format!("{}", ty),
+            Type::Vector(ty, n) => format!("::cgmath::Vector{n}<{ty}>"),
+            Type::Scalar(ty) => format!("{ty}"),
             Type::Struct(strukt) => strukt
                 .name
                 .clone()
                 .unwrap_or_else(|| String::from("UnNamed")),
-            Type::Array(ty) => format!("Vec<{}>", ty),
-            Type::Matrix(ty, size) => format!("::cgmath::Matrix{}<{}>", size, ty),
+            Type::Array(ty) => format!("Vec<{ty}>"),
+            Type::Matrix(ty, size) => format!("::cgmath::Matrix{size}<{ty}>"),
             _ => unimplemented!(),
         })
     }

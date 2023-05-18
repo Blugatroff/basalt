@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
+    ops::Deref,
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -23,7 +24,7 @@ impl DescriptorSetLayout {
     }
 }
 
-impl<'a> std::ops::Deref for DescriptorSetLayout {
+impl std::ops::Deref for DescriptorSetLayout {
     type Target = vk::DescriptorSetLayout;
     fn deref(&self) -> &Self::Target {
         &self.layout
@@ -33,8 +34,7 @@ impl<'a> std::ops::Deref for DescriptorSetLayout {
 impl<'a> Drop for DescriptorSetLayout {
     fn drop(&mut self) {
         unsafe {
-            self.device
-                .destroy_descriptor_set_layout(Some(self.layout), None);
+            self.device.destroy_descriptor_set_layout(self.layout, None);
         }
     }
 }
@@ -106,14 +106,18 @@ impl DescriptorSetLayout {
         let mut create_info = vk::DescriptorSetLayoutCreateInfoBuilder::new()
             .bindings(&binding_builders)
             .flags(layout_create_flags);
-        if let Some(layout_binding_flags) = layout_binding_flags {
-            let layout_binding_flags = vk::DescriptorSetLayoutBindingFlagsCreateInfoBuilder::new()
+
+        let layout_binding_flags = layout_binding_flags.map(|layout_binding_flags| {
+            vk::DescriptorSetLayoutBindingFlagsCreateInfoBuilder::new()
                 .binding_flags(layout_binding_flags)
-                .build();
-            create_info.p_next = (&layout_binding_flags
-                as *const vk::DescriptorSetLayoutBindingFlagsCreateInfo)
-                .cast();
-        }
+        });
+        create_info.p_next = layout_binding_flags
+            .as_ref()
+            .map(|p| p.deref() as *const vk::DescriptorSetLayoutBindingFlagsCreateInfo)
+            .unwrap_or(std::ptr::null::<
+                vk::DescriptorSetLayoutBindingFlagsCreateInfo,
+            >())
+            as *const std::ffi::c_void;
         let layout = unsafe { device.create_descriptor_set_layout(&create_info, None) }.unwrap();
         Self {
             layout,
@@ -206,7 +210,11 @@ impl DescriptorPoolInner {
         self.used = 0;
         self.active = 0;
         self.pool_sizes = self.starting_pool_sizes.clone();
-        unsafe { self.device.reset_descriptor_pool(self.pool, None) }.unwrap();
+        unsafe {
+            self.device
+                .reset_descriptor_pool(self.pool, vk::DescriptorPoolResetFlags::empty())
+        }
+        .unwrap();
     }
     pub fn allocate_set(&mut self, layout: &DescriptorSetLayout) -> Option<vk::DescriptorSet> {
         if !self.attempt_to_insert(&layout.bindings) {
@@ -232,7 +240,7 @@ impl Drop for DescriptorPoolInner {
     fn drop(&mut self) {
         unsafe {
             log_resource_dropped("DescriptorPoolInner", "");
-            self.device.destroy_descriptor_pool(Some(self.pool), None);
+            self.device.destroy_descriptor_pool(self.pool, None);
         }
     }
 }
@@ -277,7 +285,6 @@ impl DescriptorSetManager {
     pub fn allocate(
         &self,
         set_layout: &DescriptorSetLayout,
-        variable_info: Option<&vk::DescriptorSetVariableDescriptorCountAllocateInfo>,
     ) -> DescriptorSet {
         for pool in self.pools.read().unwrap().iter() {
             if let Some(set) = DescriptorPool::allocate_set(pool, set_layout) {
@@ -293,7 +300,7 @@ impl DescriptorSetManager {
                 .map(|b| (b.ty, b.count * 8))
                 .collect::<Vec<_>>(),
         ));
-        self.allocate(set_layout, variable_info)
+        self.allocate(set_layout)
     }
 }
 

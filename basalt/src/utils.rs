@@ -9,12 +9,13 @@ use crate::{
     handles::{Allocator, CommandPool, Framebuffer, ImageView, RenderPass, Swapchain},
     LAYER_KHRONOS_VALIDATION,
 };
-use erupt::{vk, DeviceLoader, InstanceLoader};
+use erupt::{vk, DeviceLoader, InstanceLoader, ObjectHandle};
 use std::any::Any;
 use std::{
     ffi::{CStr, CString},
     sync::Arc,
 };
+use vk_mem_3_erupt as vma;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RasterizationState {
@@ -206,7 +207,7 @@ pub fn create_instance(
             .cast::<std::ffi::c_void>();
     }
 
-    let instance = unsafe { InstanceLoader::new(&entry, &instance_info, None) }.unwrap();
+    let instance = unsafe { InstanceLoader::new(&entry, &instance_info) }.unwrap();
     (instance, entry, device_extensions)
 }
 
@@ -224,8 +225,9 @@ pub fn create_uniform_buffer(
         *vk::BufferCreateInfoBuilder::new()
             .size(size)
             .usage(vk::BufferUsageFlags::UNIFORM_BUFFER),
-        vk_mem_erupt::MemoryUsage::CpuToGpu,
-        erupt::vk1_0::MemoryPropertyFlags::default(),
+        vma::MemoryUsage::AutoPreferDevice,
+        erupt::vk1_0::MemoryPropertyFlags::HOST_VISIBLE,
+        vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
         label!("UniformBuffer"),
     )
 }
@@ -237,7 +239,7 @@ pub fn create_descriptor_sets(
     uniform_buffer: &buffer::Allocated,
     object_buffer: &buffer::Allocated,
 ) -> DescriptorSet {
-    let set = descriptor_set_manager.allocate(layout, None);
+    let set = descriptor_set_manager.allocate(layout);
 
     let global_uniform_buffer_info = vk::DescriptorBufferInfoBuilder::new()
         .buffer(**uniform_buffer)
@@ -333,8 +335,7 @@ pub fn create_device_and_queue(
         .queue_create_infos(&queue_info)
         .enabled_features(&features)
         .enabled_extension_names(device_extensions)
-        .enabled_layer_names(device_layers)
-        .build();
+        .enabled_layer_names(device_layers);
 
     let indexing_features = vk::PhysicalDeviceDescriptorIndexingFeaturesEXT {
         shader_sampled_image_array_non_uniform_indexing: vk::TRUE,
@@ -348,7 +349,7 @@ pub fn create_device_and_queue(
         .cast::<std::ffi::c_void>();
 
     let device =
-        unsafe { DeviceLoader::new(&instance, physical_device, &device_info, None) }.unwrap();
+        unsafe { DeviceLoader::new(&instance, physical_device, &device_info) }.unwrap();
     let device = Device::new(device, instance);
     let graphics_queue = Queue::new(
         unsafe { device.get_device_queue(graphics_queue_family.0, 0) },
@@ -433,7 +434,6 @@ pub fn create_swapchain(
     let surface_caps =
         unsafe { instance.get_physical_device_surface_capabilities_khr(physical_device, surface) }
             .unwrap();
-    dbg!((swapchain_image_count, surface_caps.min_image_count));
     let mut image_count = swapchain_image_count.max(surface_caps.min_image_count);
     let max_image_count = surface_caps.max_image_count;
     if max_image_count > 0 && image_count > max_image_count {
@@ -734,8 +734,9 @@ pub fn create_renderables_buffer(allocator: Arc<Allocator>, max_objects: u64) ->
         *vk::BufferCreateInfoBuilder::new()
             .size(size)
             .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER),
-        vk_mem_erupt::MemoryUsage::CpuToGpu,
-        erupt::vk1_0::MemoryPropertyFlags::default(),
+            vma::MemoryUsage::AutoPreferDevice,
+            erupt::vk1_0::MemoryPropertyFlags::HOST_VISIBLE,
+            vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
         label!("RenderablesBuffer"),
     )
 }
@@ -747,8 +748,9 @@ pub fn create_mesh_buffer(allocator: Arc<Allocator>, size: u64) -> buffer::Alloc
     buffer::Allocated::new(
         allocator,
         *buffer_info,
-        vk_mem_erupt::MemoryUsage::CpuToGpu,
-        erupt::vk1_0::MemoryPropertyFlags::default(),
+        vma::MemoryUsage::AutoPreferDevice,
+        erupt::vk1_0::MemoryPropertyFlags::HOST_VISIBLE,
+        vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
         label!("MeshBuffer"),
     )
 }
@@ -812,7 +814,8 @@ pub fn create_indirect_buffer(allocator: Arc<Allocator>, size: usize) -> buffer:
     buffer::Allocated::new(
         allocator,
         *buffer_info,
-        vk_mem_erupt::MemoryUsage::GpuOnly,
+        vma::MemoryUsage::AutoPreferDevice,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
         Default::default(),
         label!("IndirectBuffer"),
     )
@@ -825,7 +828,7 @@ pub fn create_cull_set(
     mesh_buffer: Arc<buffer::Allocated>,
     indirect_buffer: Arc<buffer::Allocated>,
 ) -> DescriptorSet {
-    let mut set = descriptor_set_manager.allocate(layout, None);
+    let mut set = descriptor_set_manager.allocate(layout);
     let buffer_info = vk::DescriptorBufferInfoBuilder::new()
         .buffer(**mesh_buffer)
         .offset(0)

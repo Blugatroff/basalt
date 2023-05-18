@@ -5,11 +5,12 @@ use crate::{
 };
 use erupt::vk;
 use std::sync::Arc;
+use vk_mem_3_erupt as vma;
 
 #[derive(Debug)]
 pub struct Allocated {
     buffer: vk::Buffer,
-    allocation: vk_mem_erupt::Allocation,
+    allocation: vma::Allocation,
     allocator: Arc<Allocator>,
     pub size: u64,
     usage: vk::BufferUsageFlags,
@@ -20,14 +21,16 @@ impl Allocated {
     pub fn new(
         allocator: Arc<Allocator>,
         buffer_info: vk::BufferCreateInfo,
-        usage: vk_mem_erupt::MemoryUsage,
+        usage: vma::MemoryUsage,
         required_memory_properties: vk::MemoryPropertyFlags,
+        flags: vma::AllocationCreateFlags,
         name: &'static str,
     ) -> Self {
-        let vmaalloc_info = vk_mem_erupt::AllocationCreateInfo {
+        let vmaalloc_info = vma::AllocationCreateInfo {
             usage,
             required_flags: required_memory_properties,
-            ..vk_mem_erupt::AllocationCreateInfo::default()
+            flags,
+            ..vma::AllocationCreateInfo::default()
         };
         assert!(buffer_info.size > 0);
         let (buffer, allocation, _) = allocator
@@ -62,8 +65,9 @@ impl Allocated {
         let device_buffer = Self::new(
             self.allocator.clone(),
             *buffer_info,
-            vk_mem_erupt::MemoryUsage::GpuOnly,
-            erupt::vk1_0::MemoryPropertyFlags::default(),
+            vma::MemoryUsage::AutoPreferDevice,
+            erupt::vk1_0::MemoryPropertyFlags::DEVICE_LOCAL,
+            vma::AllocationCreateFlags::default(),
             label!("MeshBuffer"),
         );
         let device = transfer_context.device.clone();

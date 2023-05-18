@@ -1,10 +1,9 @@
 use basalt::{
     buffer,
     image::{Loader, Texture},
-    label, vk, vk_mem_erupt, Allocator, ColorBlendAttachment, DepthStencilInfo,
-    DescriptorSetLayout, InputAssemblyState, Mesh, MultiSamplingState, Pipeline, PipelineDesc,
-    PipelineHandle, PipelineLayout, RasterizationState, Renderable, Renderer, Sampler,
-    ShaderModule,
+    label, vk, vma, Allocator, ColorBlendAttachment, DepthStencilInfo, DescriptorSetLayout,
+    InputAssemblyState, Mesh, MultiSamplingState, Pipeline, PipelineDesc, PipelineHandle,
+    PipelineLayout, RasterizationState, Renderable, Renderer, Sampler, ShaderModule,
 };
 use egui::FontImage;
 use sdl2::event::Event;
@@ -245,8 +244,9 @@ impl EruptEgui {
         buffer::Allocated::new(
             allocator,
             *buffer_info,
-            vk_mem_erupt::MemoryUsage::CpuToGpu,
-            vk::MemoryPropertyFlags::default(),
+            vma::MemoryUsage::AutoPreferDevice,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
+            vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             label!("EguiVertexIndexBuffer"),
         )
     }
@@ -419,8 +419,9 @@ impl EruptEgui {
                     *buffer = Arc::new(buffer::Allocated::new(
                         allocator.clone(),
                         *buffer_info,
-                        vk_mem_erupt::MemoryUsage::CpuToGpu,
-                        vk::MemoryPropertyFlags::default(),
+                        vma::MemoryUsage::AutoPreferDevice,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
+                    vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
                         label!("EguiVertexIndexBuffer"),
                     ));
                     continue 'outer;

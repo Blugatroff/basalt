@@ -8,11 +8,12 @@ use crate::{
 };
 use erupt::vk;
 use std::sync::Arc;
+use vk_mem_3_erupt as vma;
 
 #[derive(Debug)]
 pub struct Allocated {
     image: vk::Image,
-    allocation: vk_mem_erupt::Allocation,
+    allocation: vk_mem_3_erupt::Allocation,
     allocator: Arc<Allocator>,
     name: String,
     width: u32,
@@ -78,10 +79,10 @@ impl Allocated {
         name: String,
     ) -> Self {
         let info = Self::image_create_info(format, usage, extent, tiling);
-        let allocation_info = vk_mem_erupt::AllocationCreateInfo {
-            usage: vk_mem_erupt::MemoryUsage::GpuOnly,
+        let allocation_info = vma::AllocationCreateInfo {
+            usage: vma::MemoryUsage::AutoPreferDevice,
             required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            ..vk_mem_erupt::AllocationCreateInfo::default()
+            ..vk_mem_3_erupt::AllocationCreateInfo::default()
         };
         let (image, allocation, _) = allocator.create_image(&info, &allocation_info).unwrap();
         let width = extent.width;
@@ -117,8 +118,9 @@ impl Allocated {
         let staging_buffer = buffer::Allocated::new(
             image_loader.allocator.clone(),
             *buffer_info,
-            vk_mem_erupt::MemoryUsage::CpuOnly,
-            erupt::vk1_0::MemoryPropertyFlags::default(),
+            vma::MemoryUsage::AutoPreferHost,
+            erupt::vk1_0::MemoryPropertyFlags::HOST_VISIBLE,
+            vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             label!("ImageStagingBuffer"),
         );
         let ptr = staging_buffer.map() as *mut _;
@@ -157,9 +159,9 @@ impl Allocated {
                     .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
                 image_loader.device.cmd_pipeline_barrier(
                     cmd,
-                    Some(vk::PipelineStageFlags::TOP_OF_PIPE),
-                    Some(vk::PipelineStageFlags::TRANSFER),
-                    None,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
                     &[],
                     &[],
                     &[image_barrier_transfer],
@@ -190,9 +192,9 @@ impl Allocated {
                     .dst_access_mask(vk::AccessFlags::SHADER_READ);
                 image_loader.device.cmd_pipeline_barrier(
                     cmd,
-                    Some(vk::PipelineStageFlags::TRANSFER),
-                    Some(vk::PipelineStageFlags::COMPUTE_SHADER),
-                    None,
+                    vk::PipelineStageFlags::TRANSFER,
+    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
                     &[],
                     &[],
                     &[image_barrier_to_read_optimal],
@@ -208,9 +210,9 @@ impl Allocated {
 
                 image_loader.device.cmd_pipeline_barrier(
                     cmd,
-                    Some(vk::PipelineStageFlags::COMPUTE_SHADER),
-                    Some(vk::PipelineStageFlags::BOTTOM_OF_PIPE),
-                    None,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    vk::DependencyFlags::empty(),
                     &[],
                     &[],
                     &[ownership_transfer_barrier],
@@ -254,7 +256,7 @@ impl Texture {
             }],
             None,
         );
-        let mut set = descriptor_set_manager.allocate(&texture_set_layout, None);
+        let mut set = descriptor_set_manager.allocate(&texture_set_layout);
         let image_info = vk::DescriptorImageInfoBuilder::new()
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .image_view(**view)

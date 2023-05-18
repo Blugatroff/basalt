@@ -6,8 +6,8 @@ use crate::{
 };
 use erupt::{cstr, vk};
 use std::{any::TypeId, ffi::CString, io::Read, marker::PhantomData, sync::Arc};
-
-pub struct Allocator(vk_mem_erupt::Allocator, Arc<Device>);
+use vk_mem_3_erupt as vma;
+pub struct Allocator(vma::Allocator, Arc<Device>);
 
 impl std::fmt::Debug for Allocator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -16,9 +16,9 @@ impl std::fmt::Debug for Allocator {
 }
 
 impl Allocator {
-    pub fn new(device: Arc<Device>, info: &vk_mem_erupt::AllocatorCreateInfo) -> Self {
+    pub fn new(device: Arc<Device>, info: &vma::AllocatorCreateInfo) -> Self {
         log_resource_created("Allocator", "");
-        Self(vk_mem_erupt::Allocator::new(info).unwrap(), device)
+        Self(vma::Allocator::new(info).unwrap(), device)
     }
 }
 
@@ -30,7 +30,7 @@ impl Drop for Allocator {
 }
 
 impl std::ops::Deref for Allocator {
-    type Target = vk_mem_erupt::Allocator;
+    type Target = vma::Allocator;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -111,7 +111,7 @@ impl std::ops::Deref for ShaderModule {
 impl Drop for ShaderModule {
     fn drop(&mut self) {
         log_resource_dropped("ShaderMode", &self.name);
-        unsafe { self.device.destroy_shader_module(Some(self.module), None) };
+        unsafe { self.device.destroy_shader_module(self.module, None) };
     }
 }
 
@@ -166,7 +166,7 @@ impl Drop for DebugUtilsMessenger {
         log_resource_dropped("DebugUtilsMessenger", "");
         unsafe {
             self.instance
-                .destroy_debug_utils_messenger_ext(Some(self.inner), None);
+                .destroy_debug_utils_messenger_ext(self.inner, None);
         }
     }
 }
@@ -244,7 +244,7 @@ impl ComputePipeline {
             .stage(*shader_stage_create_info);
         let pipeline = unsafe {
             device
-                .create_compute_pipelines(None, &[create_info], None)
+                .create_compute_pipelines(vk::PipelineCache::default(), &[create_info], None)
                 .unwrap()
         };
         assert_eq!(pipeline.len(), 1);
@@ -273,7 +273,7 @@ impl std::ops::Deref for ComputePipeline {
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
         log_resource_dropped("ComputePipeline", &self.name);
-        unsafe { self.device.destroy_pipeline(Some(self.pipeline), None) };
+        unsafe { self.device.destroy_pipeline(self.pipeline, None) };
     }
 }
 
@@ -336,7 +336,7 @@ impl Pipeline {
                 .depth_stencil_state(&depth_stencil_state)
                 .subpass(0);
 
-            unsafe { device.create_graphics_pipelines(None, &[pipeline_info], None) }.unwrap()[0]
+            unsafe { device.create_graphics_pipelines(vk::PipelineCache::default(), &[pipeline_info], None) }.unwrap()[0]
         }
         let vertex_description = V::description();
         let name = name.to_string();
@@ -377,7 +377,7 @@ impl Drop for Pipeline {
     fn drop(&mut self) {
         unsafe {
             log_resource_dropped("Pipeline", &self.name);
-            self.device.destroy_pipeline(Some(self.pipeline), None);
+            self.device.destroy_pipeline(self.pipeline, None);
         }
     }
 }
@@ -451,7 +451,7 @@ impl std::ops::Deref for PipelineLayout {
 impl Drop for PipelineLayout {
     fn drop(&mut self) {
         log_resource_dropped("PipelineLayout", &self.name);
-        unsafe { self.device.destroy_pipeline_layout(Some(self.inner), None) }
+        unsafe { self.device.destroy_pipeline_layout(self.inner, None) }
     }
 }
 
@@ -480,7 +480,7 @@ impl Drop for Surface {
     fn drop(&mut self) {
         unsafe {
             log_resource_dropped("Surface", "");
-            self.instance.destroy_surface_khr(Some(self.surface), None);
+            self.instance.destroy_surface_khr(self.surface, None);
         }
     }
 }
@@ -498,7 +498,7 @@ macro_rules! handle {
         }
 
         impl $name {
-            pub fn new<'a>(device: Arc<Device>, info: &$info, name: impl Into<String>) -> Self {
+            pub fn new(device: Arc<Device>, info: &$info, name: impl Into<String>) -> Self {
                 let inner = $create(&device, info);
                 let name = name.into();
                 crate::utils::log_resource_created(stringify!($name), &name);
@@ -579,7 +579,7 @@ impl Drop for CommandPool {
     fn drop(&mut self) {
         log_resource_dropped("CommandPool", &self.name);
         unsafe {
-            self.device.destroy_command_pool(Some(self.inner), None);
+            self.device.destroy_command_pool(self.inner, None);
         }
     }
 }
@@ -623,7 +623,7 @@ impl Drop for Fence {
     fn drop(&mut self) {
         log_resource_dropped("Fence", &self.name);
         unsafe {
-            self.device.destroy_fence(Some(self.inner), None);
+            self.device.destroy_fence(self.inner, None);
         }
     }
 }
@@ -703,7 +703,7 @@ impl Drop for ImageView {
     fn drop(&mut self) {
         unsafe {
             crate::utils::log_resource_dropped("ImageView", &self.name);
-            self.device.destroy_image_view(Some(self.inner), None);
+            self.device.destroy_image_view(self.inner, None);
         }
         drop(self.image.take());
     }
@@ -714,7 +714,7 @@ handle!(
     vk::SwapchainKHR,
     vk::SwapchainCreateInfoKHRBuilder,
     |device: &Arc<Device>, info| unsafe { device.create_swapchain_khr(info, None).unwrap() },
-    |device: &Arc<Device>, inner| unsafe { device.destroy_swapchain_khr(Some(inner), None) }
+    |device: &Arc<Device>, inner| unsafe { device.destroy_swapchain_khr(inner, None) }
 );
 
 handle!(
@@ -722,7 +722,7 @@ handle!(
     vk::Framebuffer,
     vk::FramebufferCreateInfoBuilder,
     |device: &Arc<Device>, info| unsafe { device.create_framebuffer(info, None).unwrap() },
-    |device: &Arc<Device>, inner| unsafe { device.destroy_framebuffer(Some(inner), None) }
+    |device: &Arc<Device>, inner| unsafe { device.destroy_framebuffer(inner, None) }
 );
 
 handle!(
@@ -730,7 +730,7 @@ handle!(
     vk::RenderPass,
     vk::RenderPassCreateInfoBuilder,
     |device: &Arc<Device>, info| unsafe { device.create_render_pass(info, None).unwrap() },
-    |device: &Arc<Device>, inner| unsafe { device.destroy_render_pass(Some(inner), None) }
+    |device: &Arc<Device>, inner| unsafe { device.destroy_render_pass(inner, None) }
 );
 
 handle!(
@@ -738,7 +738,7 @@ handle!(
     vk::Semaphore,
     vk::SemaphoreCreateInfoBuilder,
     |device: &Arc<Device>, info| unsafe { device.create_semaphore(info, None).unwrap() },
-    |device: &Arc<Device>, inner| unsafe { device.destroy_semaphore(Some(inner), None) }
+    |device: &Arc<Device>, inner| unsafe { device.destroy_semaphore(inner, None) }
 );
 
 handle!(
@@ -746,5 +746,5 @@ handle!(
     vk::Sampler,
     vk::SamplerCreateInfoBuilder,
     |device: &Arc<Device>, info| unsafe { device.create_sampler(info, None).unwrap() },
-    |device: &Arc<Device>, inner| unsafe { device.destroy_sampler(Some(inner), None) }
+    |device: &Arc<Device>, inner| unsafe { device.destroy_sampler(inner, None) }
 );

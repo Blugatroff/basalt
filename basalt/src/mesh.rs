@@ -6,6 +6,7 @@ use cgmath::InnerSpace;
 use erupt::vk;
 use std::any::TypeId;
 use std::sync::Arc;
+use vk_mem_3_erupt as vma;
 
 #[derive(Clone)]
 pub struct VertexInfoDescription {
@@ -179,7 +180,7 @@ impl Mesh {
         for i in indices {
             assert!(*i < vertices.len() as u32);
         }
-        if (buffer.size as u64)
+        if buffer.size
             < (offset
                 + vertices.len() * std::mem::size_of::<V>()
                 + indices.len() * std::mem::size_of::<u32>()) as u64
@@ -237,8 +238,9 @@ impl Mesh {
         let buffer = Arc::new(buffer::Allocated::new(
             allocator,
             *buffer_info,
-            vk_mem_erupt::MemoryUsage::CpuToGpu,
-            erupt::vk1_0::MemoryPropertyFlags::default(),
+            vma::MemoryUsage::AutoPreferDevice,
+            erupt::vk1_0::MemoryPropertyFlags::HOST_VISIBLE,
+            vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             label!("MeshStagingBuffer"),
         ));
         let (mut mesh, _) =
@@ -281,8 +283,9 @@ impl Mesh {
         let staging_buffer = Arc::new(buffer::Allocated::new(
             allocator,
             *buffer_info,
-            vk_mem_erupt::MemoryUsage::CpuToGpu,
-            erupt::vk1_0::MemoryPropertyFlags::default(),
+            vma::MemoryUsage::AutoPreferDevice,
+            erupt::vk1_0::MemoryPropertyFlags::HOST_VISIBLE,
+            vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             label!("CombineMeshesStagingBuffer"),
         ));
         let mut offset = 0;
@@ -298,10 +301,10 @@ impl Mesh {
                 let regions = &[region];
                 device.cmd_copy_buffer(cmd, **mesh.buffer, **staging_buffer, regions);
                 mesh.index_start +=
-                    TryInto::<u32>::try_into(offset as u64 / std::mem::size_of::<u32>() as u64)
+                    TryInto::<u32>::try_into(offset / std::mem::size_of::<u32>() as u64)
                         .unwrap();
                 mesh.vertex_start +=
-                    TryInto::<u32>::try_into(offset as u64 / (mesh.vertex_type_size as u64))
+                    TryInto::<u32>::try_into(offset / (mesh.vertex_type_size as u64))
                         .unwrap();
                 offset += mesh.buffer.size;
             }

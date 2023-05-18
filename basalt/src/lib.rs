@@ -4,7 +4,8 @@
     clippy::struct_excessive_bools,
     clippy::cast_ptr_alignment,
     clippy::ptr_as_ptr,
-    clippy::items_after_statements
+    clippy::items_after_statements,
+    clippy::drop_non_drop
 )]
 #[macro_export]
 macro_rules! label {
@@ -45,7 +46,7 @@ pub use utils::DepthStencilInfo;
 pub use utils::InputAssemblyState;
 pub use utils::MultiSamplingState;
 pub use utils::RasterizationState;
-pub use vk_mem_erupt;
+pub use vk_mem_3_erupt as vma;
 pub mod buffer;
 pub mod image;
 pub use descriptor_sets::DescriptorSet;
@@ -207,14 +208,14 @@ impl TransferContext {
             let submit_info = vk::SubmitInfoBuilder::new().command_buffers(cmds);
             let queue = self.transfer_queue.lock().unwrap();
             self.device
-                .queue_submit(**queue, &[submit_info], Some(**fence))
+                .queue_submit(**queue, &[submit_info], **fence)
                 .unwrap();
             drop(queue);
             self.device
                 .wait_for_fences(&[**fence], true, 1_000_000_000)
                 .unwrap();
             self.device
-                .reset_command_pool(**command_pool, None)
+                .reset_command_pool(**command_pool, vk::CommandPoolResetFlags::empty())
                 .unwrap();
             drop(command_pool);
             drop(fence);
@@ -359,14 +360,16 @@ impl Renderer {
         let (render_fences, present_semaphores, render_semaphores) =
             create_sync_objects(&device, frames_in_flight);
 
-        let allocator_info = vk_mem_erupt::AllocatorCreateInfo {
+        let allocator_info = vma::AllocatorCreateInfo {
             physical_device,
             device: device.raw(),
             instance: instance.raw(),
-            flags: vk_mem_erupt::AllocatorCreateFlags::NONE,
+            flags: vma::AllocatorCreateFlags::NONE,
             preferred_large_heap_block_size: 0,
-            frame_in_use_count: 0,
             heap_size_limits: None,
+            allocation_callbacks: None,
+            device_memory_callbacks: None,
+            vulkan_api_version: vk::API_VERSION_1_2
         };
 
         let allocator = Arc::new(Allocator::new(device.clone(), &allocator_info));
@@ -688,7 +691,7 @@ impl Renderer {
             &self.physical_device_properties.limits,
         );
         self.uniform_buffer = uniform_buffer;
-        let max_objects = self.frames.max_objects.get(0).copied().unwrap_or(8);
+        let max_objects = self.frames.max_objects.first().copied().unwrap_or(8);
         self.frames
             .max_objects
             .resize_with(self.frames_in_flight, || max_objects);
@@ -789,8 +792,7 @@ impl Renderer {
             *self.render_pass,
             &self.swapchain_image_views,
             &self.frames.depth_image_views,
-        )
-        .into();
+        );
         self.reload_pipelines();
         self.frames.command_buffers = create_command_buffers(
             &self.device,
@@ -1087,8 +1089,8 @@ impl Renderer {
             let res = device.acquire_next_image_khr(
                 **swapchain,
                 1_000_000_000,
-                Some(**frame.present_semaphore),
-                None,
+                **frame.present_semaphore,
+                vk::Fence::default(),
             );
             res.value.map(|value| value as usize)
         }
@@ -1150,15 +1152,15 @@ impl Renderer {
         fn flip<T>(t: &mut (T, T)) {
             std::mem::swap(&mut t.0, &mut t.1)
         }
-        let mut frame = self.frames.get_mut(frame_index);
-        flip(&mut frame.framebuffer);
+        let frame = self.frames.get_mut(frame_index);
+        flip(frame.framebuffer);
         //flip(&mut frame.depth_image_view);
         cmd
     }
     fn begin_command_buffer(&self, frame: &FrameData) {
         unsafe {
             let cmd = *frame.command_buffer;
-            self.device.reset_command_buffer(cmd, None).unwrap();
+            self.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).unwrap();
             let begin_info = vk::CommandBufferBeginInfoBuilder::new()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             self.device.begin_command_buffer(cmd, &begin_info).unwrap();
@@ -1208,9 +1210,9 @@ impl Renderer {
             let dst_stage_mask = vk::PipelineStageFlags::DRAW_INDIRECT;
             self.device.cmd_pipeline_barrier(
                 cmd,
-                Some(src_stage_mask),
-                Some(dst_stage_mask),
-                None,
+                src_stage_mask,
+                dst_stage_mask,
+                vk::DependencyFlags::empty(),
                 &[],
                 &[buffer_memory_barrier],
                 &[],
@@ -1294,7 +1296,7 @@ impl Renderer {
         let queue = self.graphics_queue.lock().unwrap();
         unsafe {
             self.device
-                .queue_submit(**queue, &[submit], Some(**frame.render_fence))
+                .queue_submit(**queue, &[submit], **frame.render_fence)
                 .unwrap();
         }
     }
@@ -1342,7 +1344,7 @@ impl Renderer {
             sets: custom_sets,
             pipelines,
             num_renderables,
-        } = Self::batch_renderables(&*materials, renderables);
+        } = Self::batch_renderables(&materials, renderables);
         let global_uniform_offset = self.update_global_uniform(
             frame_index,
             view_proj,
