@@ -1,9 +1,9 @@
 use basalt::{
     buffer,
     image::{Loader, Texture},
-    label, vk, vma, Allocator, ColorBlendAttachment, DepthStencilInfo, DescriptorSetLayout,
+    label, vk::{self, PipelineDepthStencilStateCreateInfo}, Allocator, DescriptorSetLayout,
     InputAssemblyState, Mesh, MultiSamplingState, Pipeline, PipelineDesc, PipelineHandle,
-    PipelineLayout, RasterizationState, Renderable, Renderer, Sampler, ShaderModule,
+    PipelineLayout, RasterizationState, Renderable, Renderer, Sampler, ShaderModule, vma,
 };
 use egui::FontImage;
 use sdl2::event::Event;
@@ -84,32 +84,34 @@ impl basalt::Vertex for EguiVertex {
             std::mem::size_of::<Self>(),
             std::mem::size_of::<egui::epaint::Vertex>()
         );
-        let bindings = vec![
-            vk::VertexInputBindingDescriptionBuilder::new()
-                .binding(0)
-                .stride(std::mem::size_of::<Self>().try_into().unwrap())
-                .input_rate(vk::VertexInputRate::VERTEX),
-            vk::VertexInputBindingDescriptionBuilder::new()
-                .binding(1)
-                .stride(std::mem::size_of::<shaders::Object>().try_into().unwrap())
-                .input_rate(vk::VertexInputRate::INSTANCE),
-        ];
+        let binding_0 = vk::VertexInputBindingDescription::builder()
+            .binding(0)
+            .stride(std::mem::size_of::<Self>().try_into().unwrap())
+            .input_rate(vk::VertexInputRate::VERTEX);
+        let binding_1 = vk::VertexInputBindingDescription::builder()
+            .binding(1)
+            .stride(std::mem::size_of::<shaders::Object>().try_into().unwrap())
+            .input_rate(vk::VertexInputRate::INSTANCE);
+        let bindings = vec![binding_0.build(), binding_1.build()];
         let attributes = vec![
-            vk::VertexInputAttributeDescriptionBuilder::new()
+            vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(0)
                 .format(vk::Format::R32G32_SFLOAT)
-                .offset(0),
-            vk::VertexInputAttributeDescriptionBuilder::new()
+                .offset(0)
+                .build(),
+            vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(1)
                 .format(vk::Format::R32G32_SFLOAT)
-                .offset(std::mem::size_of::<[f32; 2]>().try_into().unwrap()),
-            vk::VertexInputAttributeDescriptionBuilder::new()
+                .offset(std::mem::size_of::<[f32; 2]>().try_into().unwrap())
+                .build(),
+            vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(2)
                 .format(vk::Format::R8G8B8A8_UNORM)
-                .offset(std::mem::size_of::<[f32; 4]>().try_into().unwrap()),
+                .offset(std::mem::size_of::<[f32; 4]>().try_into().unwrap())
+                .build(),
         ];
         basalt::VertexInfoDescription {
             bindings,
@@ -142,13 +144,13 @@ impl EruptEgui {
             app.device().clone(),
             include_bytes!("../../shaders/egui.vert.spv"),
             String::from(label!("EguiVertexShader")),
-            vk::ShaderStageFlagBits::VERTEX,
+            vk::ShaderStageFlags::VERTEX,
         );
         let frag_shader = ShaderModule::new(
             app.device().clone(),
             include_bytes!("../../shaders/egui.frag.spv"),
             String::from("EguiFragmentShader"),
-            vk::ShaderStageFlagBits::FRAGMENT,
+            vk::ShaderStageFlags::FRAGMENT,
         );
 
         let texture_set_layout = Arc::new(
@@ -180,13 +182,20 @@ impl EruptEgui {
                 **params.render_pass,
                 &PipelineDesc {
                     view_port,
-                    scissor: vk::Rect2DBuilder::new()
-                        .offset(vk::Offset2D { x: 0, y: 0 })
-                        .extent(vk::Extent2D { width, height }),
-                    color_blend_attachment: ColorBlendAttachment {
-                        blend_enable: true,
-                        src_color_factor: vk::BlendFactor::ONE,
-                        dst_color_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+                    scissor: Arc::new(
+                        vk::Rect2D::builder()
+                            .offset(vk::Offset2D { x: 0, y: 0 })
+                            .extent(vk::Extent2D { width, height }),
+                    ),
+                    color_blend_attachment: vk::PipelineColorBlendAttachmentState {
+                        blend_enable: vk::TRUE,
+                        src_color_blend_factor: vk::BlendFactor::ONE,
+                        dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+                        color_blend_op: vk::BlendOp::ADD,
+                        src_alpha_blend_factor: vk::BlendFactor::ONE,
+                        dst_alpha_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+                        alpha_blend_op: vk::BlendOp::ADD,
+                        color_write_mask: vk::ColorComponentFlags::RGBA,
                     },
                     shader_stages: &shader_stages,
                     input_assembly_state: InputAssemblyState {
@@ -199,10 +208,8 @@ impl EruptEgui {
                     },
                     multisample_state: MultiSamplingState {},
                     layout: Arc::clone(&pipeline_layout),
-                    depth_stencil: DepthStencilInfo {
-                        write: false,
-                        test: None,
-                    },
+                    depth_stencil: PipelineDepthStencilStateCreateInfo::builder().depth_write_enable(false).depth_test_enable(false).build()
+                         ,
                 },
                 &label!("EguiPipeline"),
             )
@@ -212,7 +219,7 @@ impl EruptEgui {
             .collect();
         let filter = vk::Filter::NEAREST;
         let address_mode = vk::SamplerAddressMode::REPEAT;
-        let sampler = vk::SamplerCreateInfoBuilder::new()
+        let sampler = vk::SamplerCreateInfo::builder()
             .mag_filter(filter)
             .address_mode_u(address_mode)
             .address_mode_v(address_mode)
@@ -238,7 +245,7 @@ impl EruptEgui {
         }
     }
     fn create_buffer(allocator: Arc<Allocator>) -> buffer::Allocated {
-        let buffer_info = vk::BufferCreateInfoBuilder::new()
+        let buffer_info = vk::BufferCreateInfo::builder()
             .size(2_u64.pow(12))
             .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER);
         buffer::Allocated::new(
@@ -404,7 +411,7 @@ impl EruptEgui {
                 ) {
                     (mesh, size)
                 } else {
-                    let buffer_info = vk::BufferCreateInfoBuilder::new()
+                    let buffer_info = vk::BufferCreateInfo::builder()
                         .size(
                             ((offset
                                 + mesh.vertices.len()
@@ -420,8 +427,8 @@ impl EruptEgui {
                         allocator.clone(),
                         *buffer_info,
                         vma::MemoryUsage::AutoPreferDevice,
-            vk::MemoryPropertyFlags::HOST_VISIBLE,
-                    vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+                        vk::MemoryPropertyFlags::HOST_VISIBLE,
+                        vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
                         label!("EguiVertexIndexBuffer"),
                     ));
                     continue 'outer;

@@ -20,10 +20,11 @@ use cgmath::Matrix4;
 use cgmath::SquareMatrix;
 use cgmath::Vector3;
 use cgmath::Vector4;
+pub use vma;
 pub use descriptor_sets::DescriptorSetLayout;
 pub use descriptor_sets::DescriptorSetLayoutBinding;
 pub use descriptor_sets::DescriptorSetManager;
-pub use erupt::vk;
+pub use ash::vk;
 use frame::FrameDataMut;
 pub use handles::Allocator;
 pub use handles::CommandPool;
@@ -46,7 +47,6 @@ pub use utils::DepthStencilInfo;
 pub use utils::InputAssemblyState;
 pub use utils::MultiSamplingState;
 pub use utils::RasterizationState;
-pub use vk_mem_3_erupt as vma;
 pub mod buffer;
 pub mod image;
 pub use descriptor_sets::DescriptorSet;
@@ -63,7 +63,6 @@ use crate::handles::DebugUtilsMessenger;
 use crate::utils::create_cull_set;
 use crate::utils::create_indirect_buffer;
 use crate::utils::create_sync_objects;
-use erupt::cstr;
 use frame::FrameData;
 use frame::Frames;
 use handles::{Fence, ImageView, Instance, RenderPass, Surface, Swapchain};
@@ -71,7 +70,6 @@ use std::fmt::Debug;
 use std::sync::Mutex;
 use std::{
     ffi::{c_void, CStr},
-    os::raw::c_char,
     sync::Arc,
 };
 use utils::{
@@ -82,22 +80,21 @@ use utils::{
     create_uniform_buffer, pad_uniform_buffer_size,
 };
 
-const LAYER_KHRONOS_VALIDATION: *const c_char = cstr!("VK_LAYER_KHRONOS_validation");
 unsafe extern "system" fn debug_callback(
-    message_severity: vk::DebugUtilsMessageSeverityFlagBitsEXT,
+    message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     _message_types: vk::DebugUtilsMessageTypeFlagsEXT,
     p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
     _p_user_data: *mut c_void,
 ) -> vk::Bool32 {
     let msg = CStr::from_ptr((*p_callback_data).p_message).to_string_lossy();
-    if (message_severity.0 & vk::DebugUtilsMessageSeverityFlagBitsEXT::INFO_EXT.0) != 0 {
+    if message_severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::INFO) {
         log::info!("{}", msg);
     }
-    if (message_severity.0 & vk::DebugUtilsMessageSeverityFlagBitsEXT::WARNING_EXT.0) != 0 {
+    if message_severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
         log::warn!("{}", msg);
         //panic!();
     }
-    if (message_severity.0 & vk::DebugUtilsMessageSeverityFlagBitsEXT::ERROR_EXT.0) != 0 {
+    if message_severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
         log::error!("{}", msg);
         panic!();
     }
@@ -105,7 +102,7 @@ unsafe extern "system" fn debug_callback(
     vk::FALSE
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Renderable<'a> {
     pub transform: &'a cgmath::Matrix4<f32>,
     pub mesh: &'a Arc<Mesh>,
@@ -124,7 +121,6 @@ pub struct PipelineCreationParams<'a> {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
 struct InstancingBatch<'a> {
     pipeline: &'a Pipeline,
     index_vertex_buffer: &'a buffer::Allocated,
@@ -138,7 +134,6 @@ struct InstancingBatch<'a> {
     first_instance: u32,
 }
 
-#[derive(Debug)]
 struct IndirectDraw<'a> {
     pipeline: &'a Pipeline,
     index_vertex_buffer: &'a buffer::Allocated,
@@ -193,22 +188,23 @@ impl TransferContext {
         unsafe {
             let fence = self.fence.lock().unwrap();
             let command_pool = self.command_pool.lock().unwrap();
+            
             self.device.reset_fences(&[**fence]).unwrap();
-            let alloc_info = vk::CommandBufferAllocateInfoBuilder::new()
+            let alloc_info = vk::CommandBufferAllocateInfo::builder()
                 .command_buffer_count(1)
                 .level(vk::CommandBufferLevel::PRIMARY)
                 .command_pool(**command_pool);
             let cmd = self.device.allocate_command_buffers(&alloc_info).unwrap()[0];
-            let begin_info = vk::CommandBufferBeginInfoBuilder::new()
+            let begin_info = vk::CommandBufferBeginInfo::builder()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             self.device.begin_command_buffer(cmd, &begin_info).unwrap();
             f(cmd);
             self.device.end_command_buffer(cmd).unwrap();
             let cmds = &[cmd];
-            let submit_info = vk::SubmitInfoBuilder::new().command_buffers(cmds);
+            let submit_info = vk::SubmitInfo::builder().command_buffers(cmds);
             let queue = self.transfer_queue.lock().unwrap();
             self.device
-                .queue_submit(**queue, &[submit_info], **fence)
+                .queue_submit(**queue, &[*submit_info], **fence)
                 .unwrap();
             drop(queue);
             self.device
@@ -288,22 +284,22 @@ impl Renderer {
 
         let (instance, entry, mut device_extensions) =
             create_instance(&w, validation_layers, &messenger_info);
-        device_extensions.push(vk::KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME);
-        device_extensions.push(vk::KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
+            
+        device_extensions.push(vk::KhrShaderDrawParametersFn::name().as_ptr());
+        device_extensions.push(vk::KhrDrawIndirectCountFn::name().as_ptr());
         //device_extensions.push(vk::KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
         //device_extensions.push(vk::EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
-        let instance = Arc::new(Instance::new(instance, entry));
-        let mut device_layers = Vec::new();
+        let mut device_layers: Vec<*const i8> = Vec::new();
 
         let messenger = if validation_layers {
-            device_layers.push(LAYER_KHRONOS_VALIDATION);
-            Some(DebugUtilsMessenger::new(instance.clone(), &messenger_info))
+            device_layers.push(b"VK_LAYER_KHRONOS_validation\0" as *const u8 as *const i8);
+            Some(DebugUtilsMessenger::new(&entry, &instance, &messenger_info))
         } else {
             None
         };
-
-        let surface = Surface::new(instance.clone(), &w);
-        let present_mode = vk::PresentModeKHR::MAILBOX_KHR;
+        let instance = Arc::new(instance);
+        let surface = Surface::new(&entry, instance.clone(), &w);
+        let present_mode = vk::PresentModeKHR::MAILBOX;
 
         let (
             physical_device,
@@ -315,10 +311,10 @@ impl Renderer {
             transfer_family,
         ) = create_physical_device(
             &instance,
-            *surface,
+            &surface,
             &device_extensions,
             present_mode,
-            vk::PresentModeKHR::FIFO_KHR,
+            vk::PresentModeKHR::FIFO,
         );
         //let transfer_family = None;
         log::info!("Using physical device: {:?}", unsafe {
@@ -337,7 +333,7 @@ impl Renderer {
             create_swapchain(
                 &instance,
                 physical_device,
-                *surface,
+                &surface,
                 format,
                 &device,
                 present_mode,
@@ -347,7 +343,7 @@ impl Renderer {
         let swapchain_image_views: Vec<Arc<ImageView>> =
             swapchain_image_views.into_iter().map(Arc::new).collect();
 
-        let command_pool_info = vk::CommandPoolCreateInfoBuilder::new()
+        let command_pool_info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(graphics_family.0)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let command_pool = CommandPool::new(device.clone(), &command_pool_info, label!());
@@ -360,19 +356,9 @@ impl Renderer {
         let (render_fences, present_semaphores, render_semaphores) =
             create_sync_objects(&device, frames_in_flight);
 
-        let allocator_info = vma::AllocatorCreateInfo {
-            physical_device,
-            device: device.raw(),
-            instance: instance.raw(),
-            flags: vma::AllocatorCreateFlags::NONE,
-            preferred_large_heap_block_size: 0,
-            heap_size_limits: None,
-            allocation_callbacks: None,
-            device_memory_callbacks: None,
-            vulkan_api_version: vk::API_VERSION_1_2
-        };
+        let allocator_info = vma::AllocatorCreateInfo::new(&*instance, &*device, physical_device);
 
-        let allocator = Arc::new(Allocator::new(device.clone(), &allocator_info));
+        let allocator = Arc::new(Allocator::new(device.clone(), allocator_info));
         let depth_images: Vec<(Arc<image::Allocated>, Arc<image::Allocated>)> =
             create_depth_images(&allocator, width, height, frames_in_flight)
                 .into_iter()
@@ -426,7 +412,7 @@ impl Renderer {
         let global_set_layout = Arc::new(create_global_descriptor_set_layout(device.clone()));
         let filter = vk::Filter::NEAREST;
         let address_mode = vk::SamplerAddressMode::REPEAT;
-        let sampler = vk::SamplerCreateInfoBuilder::new()
+        let sampler = vk::SamplerCreateInfo::builder()
             .mag_filter(filter)
             .address_mode_u(address_mode)
             .address_mode_v(address_mode)
@@ -512,7 +498,7 @@ impl Renderer {
             framebuffers,
         };
         let materials = Default::default();
-        let fence_info = vk::FenceCreateInfoBuilder::new().flags(vk::FenceCreateFlags::empty());
+        let fence_info = vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::empty());
         let fence = Mutex::new(Fence::new(
             device.clone(),
             &fence_info,
@@ -524,7 +510,7 @@ impl Renderer {
         let transfer_queue = transfer_queue
             .map(|q| Arc::new(Mutex::new(q)))
             .unwrap_or_else(|| graphics_queue.clone());
-        let command_pool_info = vk::CommandPoolCreateInfoBuilder::new()
+        let command_pool_info = vk::CommandPoolCreateInfo::builder()
             .queue_family_index(transfer_family.0)
             .flags(
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER
@@ -553,7 +539,7 @@ impl Renderer {
             device.clone(),
             include_bytes!("../../shaders/cull.comp.spv"),
             String::from("CullShader"),
-            vk::ShaderStageFlagBits::VERTEX,
+            vk::ShaderStageFlags::VERTEX,
         );
 
         let compute_pipeline_layout = Arc::new(PipelineLayout::new(
@@ -649,15 +635,15 @@ impl Renderer {
     }
     fn set_present_mode(&mut self) {
         if self.vsync {
-            self.present_mode = vk::PresentModeKHR::FIFO_KHR;
+            self.present_mode = vk::PresentModeKHR::FIFO;
         } else {
             self.present_mode = if self
                 .supported_present_modes
-                .contains(&vk::PresentModeKHR::MAILBOX_KHR)
+                .contains(&vk::PresentModeKHR::MAILBOX)
             {
-                vk::PresentModeKHR::MAILBOX_KHR
+                vk::PresentModeKHR::MAILBOX
             } else {
-                vk::PresentModeKHR::IMMEDIATE_KHR
+                vk::PresentModeKHR::IMMEDIATE
             };
         }
     }
@@ -758,7 +744,7 @@ impl Renderer {
             create_swapchain(
                 &self.instance,
                 self.physical_device,
-                *self.surface,
+                &self.surface,
                 self.format,
                 &self.device,
                 self.present_mode,
@@ -989,7 +975,7 @@ impl Renderer {
         }
         draws
     }
-    fn write_renderables(buffer: &buffer::Allocated, instancing_batches: &[InstancingBatch]) {
+    fn write_renderables(buffer: &mut buffer::Allocated, instancing_batches: &[InstancingBatch]) {
         puffin::profile_function!();
         let ptr = buffer.map().cast::<shaders::Object>() as *mut shaders::Object;
         let num_renderables = instancing_batches.iter().map(|b| b.renderables.len()).sum();
@@ -1080,19 +1066,18 @@ impl Renderer {
         }
     }
     fn acquire_swapchain_image(
-        device: &Device,
         swapchain: &Swapchain,
         frame: &FrameData,
-    ) -> Option<usize> {
+    ) -> Result<usize, vk::Result> {
         puffin::profile_function!();
         unsafe {
-            let res = device.acquire_next_image_khr(
+            let res = swapchain.loader().acquire_next_image(
                 **swapchain,
                 1_000_000_000,
                 **frame.present_semaphore,
                 vk::Fence::default(),
             );
-            res.value.map(|value| value as usize)
+            res.map(|(value, _suboptimal)| value as usize)
         }
     }
     fn resize_mesh_buffer_if_necessary(&mut self, num_meshes: usize, frame_index: usize) {
@@ -1131,11 +1116,11 @@ impl Renderer {
                 vk::ClearValue {
                     depth_stencil: vk::ClearDepthStencilValue {
                         depth: 1.0,
-                        ..erupt::vk1_0::ClearDepthStencilValue::default()
+                        ..vk::ClearDepthStencilValue::default()
                     },
                 },
             ];
-            let rp_begin_info = vk::RenderPassBeginInfoBuilder::new()
+            let rp_begin_info = vk::RenderPassBeginInfo::builder()
                 .clear_values(clear_values)
                 .render_pass(*self.render_pass)
                 .render_area(vk::Rect2D {
@@ -1161,7 +1146,7 @@ impl Renderer {
         unsafe {
             let cmd = *frame.command_buffer;
             self.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).unwrap();
-            let begin_info = vk::CommandBufferBeginInfoBuilder::new()
+            let begin_info = vk::CommandBufferBeginInfo::builder()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             self.device.begin_command_buffer(cmd, &begin_info).unwrap();
         }
@@ -1201,7 +1186,7 @@ impl Renderer {
             let group_count_x = (renderables_len as u32 / 256) + 1;
             self.device.cmd_dispatch(cmd, group_count_x, 1, 1);
 
-            let buffer_memory_barrier = vk::BufferMemoryBarrierBuilder::new()
+            let buffer_memory_barrier = vk::BufferMemoryBarrier::builder()
                 .buffer(***frame.indirect_buffer)
                 .size(frame.indirect_buffer.size)
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)
@@ -1214,7 +1199,7 @@ impl Renderer {
                 dst_stage_mask,
                 vk::DependencyFlags::empty(),
                 &[],
-                &[buffer_memory_barrier],
+                &[*buffer_memory_barrier],
                 &[],
             );
         }
@@ -1288,7 +1273,7 @@ impl Renderer {
         let signal_semaphores = &[**frame.render_semaphore];
         let command_buffers = &[cmd];
         let wait_dst_stage_mask = &[wait_stage];
-        let submit = vk::SubmitInfoBuilder::new()
+        let submit = vk::SubmitInfo::builder()
             .wait_dst_stage_mask(wait_dst_stage_mask)
             .wait_semaphores(wait_semaphores)
             .signal_semaphores(signal_semaphores)
@@ -1296,7 +1281,7 @@ impl Renderer {
         let queue = self.graphics_queue.lock().unwrap();
         unsafe {
             self.device
-                .queue_submit(**queue, &[submit], **frame.render_fence)
+                .queue_submit(**queue, &[*submit], **frame.render_fence)
                 .unwrap();
         }
     }
@@ -1305,12 +1290,12 @@ impl Renderer {
         let image_indices = &[swapchain_image_index.try_into().unwrap()];
         let swapchains = &[*self.swapchain];
         let wait_semaphores = &[**frame.render_semaphore];
-        let present_info = vk::PresentInfoKHRBuilder::new()
+        let present_info = vk::PresentInfoKHR::builder()
             .swapchains(swapchains)
             .wait_semaphores(wait_semaphores)
             .image_indices(image_indices);
         let queue = self.graphics_queue.lock().unwrap();
-        let res = unsafe { self.device.queue_present_khr(**queue, &present_info) };
+        let res = unsafe { self.swapchain.loader().queue_present(**queue, &present_info) };
         if res.is_err() {
             log::warn!("{:#?}", res);
         }
@@ -1365,12 +1350,12 @@ impl Renderer {
             &batches,
         );
         let swapchain_image_index =
-            match Self::acquire_swapchain_image(&self.device, &self.swapchain, &frame.immu()) {
-                Some(i) => i,
-                None => return None,
+            match Self::acquire_swapchain_image(&self.swapchain, &frame.immu()) {
+                Ok(i) => i,
+                Err(_) => return None,
             };
         Self::write_renderables(frame.renderables_buffer, &batches);
-        Self::write_meshes(frame.mesh_buffer, &meshes);
+        Self::write_meshes(&frame.mesh_buffer, &meshes);
         *frame.cleanup = Some(Box::new(|| {
             drop(meshes);
             drop(custom_sets);

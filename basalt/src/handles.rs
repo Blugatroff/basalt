@@ -1,12 +1,17 @@
 use crate::{
     mesh::VertexInfoDescription,
-    utils::{log_resource_created, log_resource_dropped, ColorBlendAttachment, DepthStencilInfo},
+    utils::{log_resource_created, log_resource_dropped},
     utils::{InputAssemblyState, MultiSamplingState, RasterizationState},
     DescriptorSetLayout, Vertex,
 };
-use erupt::{cstr, vk};
+use ash::{
+    extensions::ext::DebugUtils,
+    vk::{self, DebugUtilsMessengerEXT},
+    Entry,
+};
+use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
 use std::{any::TypeId, ffi::CString, io::Read, marker::PhantomData, sync::Arc};
-use vk_mem_3_erupt as vma;
+
 pub struct Allocator(vma::Allocator, Arc<Device>);
 
 impl std::fmt::Debug for Allocator {
@@ -16,7 +21,7 @@ impl std::fmt::Debug for Allocator {
 }
 
 impl Allocator {
-    pub fn new(device: Arc<Device>, info: &vma::AllocatorCreateInfo) -> Self {
+    pub fn new(device: Arc<Device>, info: vma::AllocatorCreateInfo) -> Self {
         log_resource_created("Allocator", "");
         Self(vma::Allocator::new(info).unwrap(), device)
     }
@@ -25,7 +30,6 @@ impl Allocator {
 impl Drop for Allocator {
     fn drop(&mut self) {
         log_resource_dropped("Allocator", "");
-        self.0.destroy();
     }
 }
 
@@ -46,35 +50,30 @@ pub struct ShaderModule {
     device: Arc<Device>,
     name: String,
     shader: reflection::Shader,
-    stage: vk::ShaderStageFlagBits,
+    stage: vk::ShaderStageFlags,
 }
 impl ShaderModule {
     pub fn load(device: Arc<Device>, path: &'static str) -> Result<Self, std::io::Error> {
         let mut data = Vec::new();
         let len = std::fs::File::open(path)?.read_to_end(&mut data)?;
         let stage = if path.ends_with(".frag.spv") {
-            vk::ShaderStageFlagBits::FRAGMENT
+            vk::ShaderStageFlags::FRAGMENT
         } else if path.ends_with(".vert.spv") {
-            vk::ShaderStageFlagBits::VERTEX
+            vk::ShaderStageFlags::VERTEX
         } else if path.ends_with(".comp.spv") {
-            vk::ShaderStageFlagBits::COMPUTE
+            vk::ShaderStageFlags::COMPUTE
         } else {
             panic!()
         };
         Ok(Self::new(device, &data[0..len], path.into(), stage))
     }
-    pub fn stage(&self) -> vk::ShaderStageFlagBits {
+    pub fn stage(&self) -> vk::ShaderStageFlags {
         self.stage
     }
-    pub fn new(
-        device: Arc<Device>,
-        spv: &[u8],
-        name: String,
-        stage: vk::ShaderStageFlagBits,
-    ) -> Self {
+    pub fn new(device: Arc<Device>, spv: &[u8], name: String, stage: vk::ShaderStageFlags) -> Self {
         assert!(spv.len() % 4 == 0);
         let code = unsafe { std::slice::from_raw_parts(spv.as_ptr().cast(), spv.len() / 4) };
-        let create_info = vk::ShaderModuleCreateInfoBuilder::new().code(code);
+        let create_info = vk::ShaderModuleCreateInfo::builder().code(code);
         let module = unsafe { device.create_shader_module(&create_info, None) }.unwrap();
         let mut shaders = reflection::Shader::from_spirv(spv).unwrap();
         assert_eq!(shaders.len(), 1);
@@ -92,10 +91,10 @@ impl ShaderModule {
         &self.shader
     }
     fn builder(&self) -> vk::PipelineShaderStageCreateInfoBuilder {
-        let mut info = vk::PipelineShaderStageCreateInfoBuilder::new()
+        let mut info = vk::PipelineShaderStageCreateInfo::builder()
             .stage(self.stage)
             .module(self.module);
-        info.p_name = cstr!("main");
+        info.p_name = CString::new("main").unwrap().into_raw(); // leak memory
         info
     }
 }
@@ -115,21 +114,26 @@ impl Drop for ShaderModule {
     }
 }
 
-#[derive(Debug)]
-pub struct Device(Arc<erupt::DeviceLoader>, Arc<Instance>);
+pub struct Device(Arc<ash::Device>, Arc<Instance>);
 
 impl Device {
-    pub fn new(device: erupt::DeviceLoader, instance: Arc<Instance>) -> Self {
+    pub fn new(
+        instance: Arc<Instance>,
+        physical_device: ash::vk::PhysicalDevice,
+        create_info: &vk::DeviceCreateInfo,
+    ) -> Self {
+        let device = unsafe {
+            instance
+                .create_device(physical_device, create_info, None)
+                .unwrap()
+        };
         log_resource_created("Device", "");
         Self(Arc::new(device), instance)
-    }
-    pub fn raw(&self) -> Arc<erupt::DeviceLoader> {
-        self.0.clone()
     }
 }
 
 impl std::ops::Deref for Device {
-    type Target = erupt::DeviceLoader;
+    type Target = ash::Device;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -144,20 +148,28 @@ impl Drop for Device {
     }
 }
 
+impl std::fmt::Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Device")
+    }
+}
+
 pub struct DebugUtilsMessenger {
-    inner: vk::DebugUtilsMessengerEXT,
-    instance: Arc<Instance>,
+    debug_utils: DebugUtils,
+    inner: DebugUtilsMessengerEXT,
 }
 
 impl DebugUtilsMessenger {
     pub fn new(
-        instance: Arc<Instance>,
+        entry: &Entry,
+        instance: &Instance,
         messenger_info: &vk::DebugUtilsMessengerCreateInfoEXTBuilder,
     ) -> Self {
+        let debug_utils = DebugUtils::new(&entry, &instance);
         let inner =
-            unsafe { instance.create_debug_utils_messenger_ext(messenger_info, None) }.unwrap();
+            unsafe { debug_utils.create_debug_utils_messenger(messenger_info, None) }.unwrap();
         log_resource_created("DebugUtilsMessenger", "");
-        Self { inner, instance }
+        Self { debug_utils, inner }
     }
 }
 
@@ -165,32 +177,33 @@ impl Drop for DebugUtilsMessenger {
     fn drop(&mut self) {
         log_resource_dropped("DebugUtilsMessenger", "");
         unsafe {
-            self.instance
-                .destroy_debug_utils_messenger_ext(self.inner, None);
+            self.debug_utils
+                .destroy_debug_utils_messenger(self.inner, None);
         }
     }
 }
 
-#[derive(Debug)]
 pub struct Instance {
-    instance: Arc<erupt::InstanceLoader>,
-    #[allow(dead_code)]
-    entry: erupt::EntryLoader,
+    instance: Arc<ash::Instance>,
+}
+
+impl std::fmt::Debug for Instance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Instance").finish()
+    }
 }
 
 impl Instance {
-    pub fn new(instance: erupt::InstanceLoader, entry: erupt::EntryLoader) -> Self {
+    pub fn new(entry: &ash::Entry, create_info: &vk::InstanceCreateInfo) -> Self {
+        let instance = unsafe { entry.create_instance(&create_info, None) }.unwrap();
         let instance = Arc::new(instance);
         log_resource_created("Instance", "");
-        Self { instance, entry }
-    }
-    pub fn raw(&self) -> Arc<erupt::InstanceLoader> {
-        self.instance.clone()
+        Self { instance }
     }
 }
 
 impl std::ops::Deref for Instance {
-    type Target = erupt::InstanceLoader;
+    type Target = ash::Instance;
     fn deref(&self) -> &Self::Target {
         &self.instance
     }
@@ -205,17 +218,17 @@ impl Drop for Instance {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PipelineDesc<'a> {
     pub view_port: vk::Viewport,
-    pub scissor: vk::Rect2DBuilder<'a>,
-    pub color_blend_attachment: ColorBlendAttachment,
+    pub scissor: Arc<vk::Rect2DBuilder<'a>>,
+    pub color_blend_attachment: vk::PipelineColorBlendAttachmentState,
     pub shader_stages: &'a [&'a ShaderModule],
     pub input_assembly_state: InputAssemblyState,
     pub rasterization_state: RasterizationState,
     pub multisample_state: MultiSamplingState,
     pub layout: Arc<PipelineLayout>,
-    pub depth_stencil: DepthStencilInfo,
+    pub depth_stencil: vk::PipelineDepthStencilStateCreateInfo,
 }
 
 pub struct ComputePipeline {
@@ -233,18 +246,18 @@ impl ComputePipeline {
         name: impl Into<String>,
     ) -> Self {
         let entry_name = CString::new("main").unwrap();
-        let shader_stage_create_info = vk::PipelineShaderStageCreateInfoBuilder::new()
+        let shader_stage_create_info = vk::PipelineShaderStageCreateInfo::builder()
             .module(**shader_module)
-            .stage(vk::ShaderStageFlagBits::COMPUTE)
+            .stage(vk::ShaderStageFlags::COMPUTE)
             .flags(vk::PipelineShaderStageCreateFlags::empty())
             .name(&entry_name);
-        let create_info = vk::ComputePipelineCreateInfoBuilder::new()
+        let create_info = vk::ComputePipelineCreateInfo::builder()
             .layout(**layout)
             .flags(vk::PipelineCreateFlags::empty())
             .stage(*shader_stage_create_info);
         let pipeline = unsafe {
             device
-                .create_compute_pipelines(vk::PipelineCache::default(), &[create_info], None)
+                .create_compute_pipelines(vk::PipelineCache::default(), &[*create_info], None)
                 .unwrap()
         };
         assert_eq!(pipeline.len(), 1);
@@ -300,19 +313,17 @@ impl Pipeline {
             desc: &PipelineDesc,
             vertex_description: VertexInfoDescription,
         ) -> vk::Pipeline {
-            let viewports = &[desc.view_port.into_builder()];
-            let scissors = &[desc.scissor];
-            let viewport_state = vk::PipelineViewportStateCreateInfoBuilder::new()
+            let viewports = &[desc.view_port];
+            let scissors = &[**desc.scissor];
+            let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
                 .viewports(viewports)
                 .scissors(scissors);
-            let attachments = &[desc.color_blend_attachment.builder()];
-            let color_blend_state_create_info = vk::PipelineColorBlendStateCreateInfoBuilder::new()
+            let attachments = &[desc.color_blend_attachment];
+            let color_blend_state_create_info = vk::PipelineColorBlendStateCreateInfo::builder()
                 .logic_op_enable(false)
                 .logic_op(vk::LogicOp::COPY)
                 .attachments(attachments);
-            let depth_stencil_state = std::convert::Into::<
-                vk::PipelineDepthStencilStateCreateInfoBuilder,
-            >::into(desc.depth_stencil);
+            let depth_stencil_state = desc.depth_stencil;
             let multi_sample_state = desc.multisample_state.builder();
             let rasterization_state = desc.rasterization_state.builder();
             let vertex_info = vertex_description.builder();
@@ -323,7 +334,12 @@ impl Pipeline {
                 .copied()
                 .map(ShaderModule::builder)
                 .collect::<Vec<_>>();
-            let pipeline_info = vk::GraphicsPipelineCreateInfoBuilder::new()
+            let shader_stages = shader_stages
+                .iter()
+                .map(std::ops::Deref::deref)
+                .copied()
+                .collect::<Vec<_>>();
+            let pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
                 .stages(&shader_stages)
                 .vertex_input_state(&vertex_info)
                 .input_assembly_state(&input_assembly_state)
@@ -336,7 +352,14 @@ impl Pipeline {
                 .depth_stencil_state(&depth_stencil_state)
                 .subpass(0);
 
-            unsafe { device.create_graphics_pipelines(vk::PipelineCache::default(), &[pipeline_info], None) }.unwrap()[0]
+            unsafe {
+                device.create_graphics_pipelines(
+                    vk::PipelineCache::default(),
+                    &[*pipeline_info],
+                    None,
+                )
+            }
+            .unwrap()[0]
         }
         let vertex_description = V::description();
         let name = name.to_string();
@@ -401,7 +424,7 @@ impl PipelineLayout {
         let inner = {
             let set_layouts: Vec<vk::DescriptorSetLayout> =
                 set_layouts.iter().map(|l| ***l).collect::<Vec<_>>();
-            let info = vk::PipelineLayoutCreateInfoBuilder::new()
+            let info = vk::PipelineLayoutCreateInfo::builder()
                 .set_layouts(&set_layouts)
                 .push_constant_ranges(&[]);
             log_resource_created("PipelineLayout", &name);
@@ -456,16 +479,35 @@ impl Drop for PipelineLayout {
 }
 
 pub struct Surface {
+    surface_loader: ash::extensions::khr::Surface,
     surface: vk::SurfaceKHR,
-    instance: Arc<Instance>,
 }
 
 impl Surface {
-    pub fn new(instance: Arc<Instance>, window: &sdl2::video::Window) -> Self {
-        let surface =
-            unsafe { erupt::utils::surface::create_surface(&instance, window, None) }.unwrap();
+    pub fn new(
+        entry: &ash::Entry,
+        instance: Arc<Instance>,
+        window: &sdl2::video::Window,
+    ) -> Self {
+        let surface_loader = ash::extensions::khr::Surface::new(&*entry, &*instance);
         log_resource_created("Surface", "");
-        Self { surface, instance }
+        let surface = unsafe {
+            ash_window::create_surface(
+                &entry,
+                &instance,
+                window.raw_display_handle(),
+                window.raw_window_handle(),
+                None,
+            )
+            .unwrap()
+        };
+        Self {
+            surface_loader,
+            surface,
+        }
+    }
+    pub fn loader(&self) -> &ash::extensions::khr::Surface {
+        &self.surface_loader
     }
 }
 
@@ -480,7 +522,7 @@ impl Drop for Surface {
     fn drop(&mut self) {
         unsafe {
             log_resource_dropped("Surface", "");
-            self.instance.destroy_surface_khr(self.surface, None);
+            self.surface_loader.destroy_surface(self.surface, None);
         }
     }
 }
@@ -709,13 +751,64 @@ impl Drop for ImageView {
     }
 }
 
-handle!(
-    Swapchain,
-    vk::SwapchainKHR,
-    vk::SwapchainCreateInfoKHRBuilder,
-    |device: &Arc<Device>, info| unsafe { device.create_swapchain_khr(info, None).unwrap() },
-    |device: &Arc<Device>, inner| unsafe { device.destroy_swapchain_khr(inner, None) }
-);
+pub struct Swapchain {
+    swapchain_loader: ash::extensions::khr::Swapchain,
+    swapchain: vk::SwapchainKHR,
+    device: Arc<Device>,
+    name: String,
+    trash: Option<Trash>,
+}
+impl Swapchain {
+    pub fn new(
+        instance: &Instance,
+        device: Arc<Device>,
+        info: &vk::SwapchainCreateInfoKHRBuilder,
+        name: impl Into<String>,
+    ) -> Self {
+        let swapchain_loader = ash::extensions::khr::Swapchain::new(&instance, &device);
+        let swapchain = unsafe { swapchain_loader.create_swapchain(info, None).unwrap() };
+        let name = name.into();
+        crate::utils::log_resource_created(stringify!(Swapchain), &name);
+        Self {
+            swapchain_loader,
+            swapchain,
+            device,
+            name,
+            trash: None,
+        }
+    }
+    pub fn loader(&self) -> &ash::extensions::khr::Swapchain {
+        &self.swapchain_loader
+    }
+    #[allow(dead_code)]
+    pub fn attach_trash<T: 'static + Send + Sync>(&mut self, trash: T) {
+        self.trash = Some(if let Some(old) = self.trash.take() {
+            Arc::new((old, trash))
+        } else {
+            Arc::new(trash)
+        })
+    }
+    #[allow(dead_code)]
+    pub fn with_trash(mut self, trash: Trash) -> Self {
+        self.attach_trash(trash);
+        self
+    }
+}
+impl std::ops::Deref for Swapchain {
+    type Target = vk::SwapchainKHR;
+    fn deref(&self) -> &Self::Target {
+        &self.swapchain
+    }
+}
+impl Drop for Swapchain {
+    fn drop(&mut self) {
+        crate::utils::log_resource_dropped(stringify!(Swapchain), &self.name);
+        unsafe {
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
+        }
+    }
+}
 
 handle!(
     Framebuffer,

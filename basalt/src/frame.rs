@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
+use ash::vk;
+
 use crate::{
     buffer,
     descriptor_sets::DescriptorSet,
     handles::{Fence, Framebuffer, ImageView, Semaphore},
 };
-use erupt::vk;
 
 pub struct Frames {
     pub present_semaphores: Vec<Semaphore>,

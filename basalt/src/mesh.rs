@@ -2,23 +2,22 @@ use crate::buffer;
 use crate::handles::Allocator;
 use crate::utils::round_to;
 use crate::TransferContext;
+use ash::vk;
 use cgmath::InnerSpace;
-use erupt::vk;
 use std::any::TypeId;
 use std::sync::Arc;
-use vk_mem_3_erupt as vma;
 
 #[derive(Clone)]
 pub struct VertexInfoDescription {
-    pub bindings: Vec<vk::VertexInputBindingDescriptionBuilder<'static>>,
-    pub attributes: Vec<vk::VertexInputAttributeDescriptionBuilder<'static>>,
+    pub bindings: Vec<vk::VertexInputBindingDescription>,
+    pub attributes: Vec<vk::VertexInputAttributeDescription>,
 }
 
 impl VertexInfoDescription {
     pub fn builder(&self) -> vk::PipelineVertexInputStateCreateInfoBuilder {
         assert!(!self.bindings.is_empty());
         assert!(!self.attributes.is_empty());
-        vk::PipelineVertexInputStateCreateInfoBuilder::new()
+        vk::PipelineVertexInputStateCreateInfo::builder()
             .vertex_binding_descriptions(&self.bindings)
             .vertex_attribute_descriptions(&self.attributes)
             .flags(Default::default())
@@ -57,27 +56,27 @@ impl Vertex for DefaultVertex {
     }
     fn description() -> VertexInfoDescription {
         let bindings = vec![
-            vk::VertexInputBindingDescriptionBuilder::new()
+            *vk::VertexInputBindingDescription::builder()
                 .binding(0)
                 .stride(std::mem::size_of::<Self>().try_into().unwrap())
                 .input_rate(vk::VertexInputRate::VERTEX),
-            vk::VertexInputBindingDescriptionBuilder::new()
+            *vk::VertexInputBindingDescription::builder()
                 .binding(1)
                 .stride(std::mem::size_of::<shaders::Object>().try_into().unwrap())
                 .input_rate(vk::VertexInputRate::INSTANCE),
         ];
         let attributes = vec![
-            vk::VertexInputAttributeDescriptionBuilder::new()
+            *vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(0)
                 .format(vk::Format::R32G32B32_SFLOAT)
                 .offset(0),
-            vk::VertexInputAttributeDescriptionBuilder::new()
+            *vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(1)
                 .format(vk::Format::R32G32B32_SFLOAT)
                 .offset(std::mem::size_of::<[f32; 3]>().try_into().unwrap()),
-            vk::VertexInputAttributeDescriptionBuilder::new()
+            *vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(2)
                 .format(vk::Format::R32G32_SFLOAT)
@@ -104,7 +103,6 @@ pub struct Bounds {
     pub sphere_bounds: f32,
 }
 
-#[derive(Debug)]
 pub struct Mesh {
     pub bounds: Bounds,
     pub vertex_start: u32,
@@ -228,7 +226,7 @@ impl Mesh {
     ) -> Self {
         let size =
             std::mem::size_of::<V>() * vertices.len() + indices.len() * std::mem::size_of::<u32>();
-        let buffer_info = vk::BufferCreateInfoBuilder::new()
+        let buffer_info = vk::BufferCreateInfo::builder()
             .usage(
                 vk::BufferUsageFlags::VERTEX_BUFFER
                     | vk::BufferUsageFlags::INDEX_BUFFER
@@ -239,7 +237,7 @@ impl Mesh {
             allocator,
             *buffer_info,
             vma::MemoryUsage::AutoPreferDevice,
-            erupt::vk1_0::MemoryPropertyFlags::HOST_VISIBLE,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
             vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             label!("MeshStagingBuffer"),
         ));
@@ -277,14 +275,14 @@ impl Mesh {
         let staging_buffer_size = meshes.iter().fold(0, |size, m| {
             round_to(size, m.vertex_type_size as u64) + m.buffer.size
         });
-        let buffer_info = vk::BufferCreateInfoBuilder::new()
+        let buffer_info = vk::BufferCreateInfo::builder()
             .size(staging_buffer_size)
             .usage(vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST);
         let staging_buffer = Arc::new(buffer::Allocated::new(
             allocator,
             *buffer_info,
             vma::MemoryUsage::AutoPreferDevice,
-            erupt::vk1_0::MemoryPropertyFlags::HOST_VISIBLE,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
             vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             label!("CombineMeshesStagingBuffer"),
         ));
@@ -293,12 +291,12 @@ impl Mesh {
         transfer_context.immediate_submit(|cmd| unsafe {
             for mesh in &mut meshes {
                 offset = round_to(offset, mesh.vertex_type_size as u64);
-                let region = vk::BufferCopyBuilder::new()
+                let region = vk::BufferCopy::builder()
                     .src_offset(0)
                     .dst_offset(offset)
                     .size(mesh.buffer.size);
 
-                let regions = &[region];
+                let regions = &[*region];
                 device.cmd_copy_buffer(cmd, **mesh.buffer, **staging_buffer, regions);
                 mesh.index_start +=
                     TryInto::<u32>::try_into(offset / std::mem::size_of::<u32>() as u64)

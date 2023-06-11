@@ -1,10 +1,11 @@
 mod input;
 use basalt::puffin;
+use basalt::vk::{PipelineColorBlendAttachmentState, PipelineDepthStencilStateCreateInfo};
 use basalt::{
-    image, label, vk, ColorBlendAttachment, DefaultVertex, DepthStencilInfo, DescriptorSet,
-    DescriptorSetLayout, Device, Frustum, InputAssemblyState, MaterialLoadFn, Mesh,
-    MultiSamplingState, Pipeline, PipelineDesc, PipelineHandle, PipelineLayout, RasterizationState,
-    Renderable, Renderer, ShaderModule, Vertex, VertexInfoDescription,
+    image, label, vk, DefaultVertex, DescriptorSet, DescriptorSetLayout, Device, Frustum,
+    InputAssemblyState, MaterialLoadFn, Mesh, MultiSamplingState, Pipeline, PipelineDesc,
+    PipelineHandle, PipelineLayout, RasterizationState, Renderable, Renderer, ShaderModule, Vertex,
+    VertexInfoDescription,
 };
 use cgmath::{InnerSpace, SquareMatrix};
 use first_person_camera::FirstPersonCamera;
@@ -508,13 +509,13 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
         device.clone(),
         include_bytes!("../../shaders/mesh.vert.spv"),
         String::from("MeshPipelineVertexShader"),
-        vk::ShaderStageFlagBits::VERTEX,
+        vk::ShaderStageFlags::VERTEX,
     );
     let frag_shader = ShaderModule::new(
         device.clone(),
         include_bytes!("../../shaders/mesh.frag.spv"),
         String::from("MeshPipelineFragmentShader"),
-        vk::ShaderStageFlagBits::FRAGMENT,
+        vk::ShaderStageFlags::FRAGMENT,
     );
 
     let texture_set_layout = DescriptorSetLayout::from_shader(device, &frag_shader)
@@ -546,11 +547,14 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
             **args.render_pass,
             &PipelineDesc {
                 view_port,
-                scissor: vk::Rect2DBuilder::new()
-                    .offset(vk::Offset2D { x: 0, y: 0 })
-                    .extent(vk::Extent2D { width, height }),
-                color_blend_attachment: ColorBlendAttachment {
-                    blend_enable: false,
+                scissor: Arc::new(
+                    vk::Rect2D::builder()
+                        .offset(vk::Offset2D { x: 0, y: 0 })
+                        .extent(vk::Extent2D { width, height }),
+                ),
+                color_blend_attachment: vk::PipelineColorBlendAttachmentState {
+                    blend_enable: vk::FALSE,
+                    color_write_mask: vk::ColorComponentFlags::RGBA,
                     ..Default::default()
                 },
                 shader_stages: &shader_stages,
@@ -564,10 +568,11 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
                 },
                 multisample_state: MultiSamplingState {},
                 layout: pipeline_layout,
-                depth_stencil: DepthStencilInfo {
-                    write: true,
-                    test: Some(vk::CompareOp::LESS),
-                },
+                depth_stencil: PipelineDepthStencilStateCreateInfo::builder()
+                    .depth_write_enable(true)
+                    .depth_test_enable(true)
+                    .depth_compare_op(vk::CompareOp::LESS)
+                    .build(),
             },
             &label!("MeshPipeline"),
         )
@@ -585,21 +590,24 @@ impl Vertex for ColorVertex {
         self.position
     }
     fn description() -> VertexInfoDescription {
-        let bindings = vec![vk::VertexInputBindingDescriptionBuilder::new()
+        let bindings = vec![vk::VertexInputBindingDescription::builder()
             .binding(0)
             .stride(std::mem::size_of::<Self>().try_into().unwrap())
-            .input_rate(vk::VertexInputRate::VERTEX)];
+            .input_rate(vk::VertexInputRate::VERTEX)
+            .build()];
         let attributes = vec![
-            vk::VertexInputAttributeDescriptionBuilder::new()
+            vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(0)
                 .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(0),
-            vk::VertexInputAttributeDescriptionBuilder::new()
+                .offset(0)
+                .build(),
+            vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(1)
                 .format(vk::Format::R32_UINT)
-                .offset(std::mem::size_of::<[f32; 3]>().try_into().unwrap()),
+                .offset(std::mem::size_of::<[f32; 3]>().try_into().unwrap())
+                .build(),
         ];
         VertexInfoDescription {
             bindings,
@@ -630,21 +638,24 @@ impl Vertex for LineVertex {
         self.position
     }
     fn description() -> VertexInfoDescription {
-        let bindings = vec![vk::VertexInputBindingDescriptionBuilder::new()
+        let bindings = vec![vk::VertexInputBindingDescription::builder()
             .binding(0)
             .stride(std::mem::size_of::<Self>().try_into().unwrap())
-            .input_rate(vk::VertexInputRate::VERTEX)];
+            .input_rate(vk::VertexInputRate::VERTEX)
+            .build()];
         let attributes = vec![
-            vk::VertexInputAttributeDescriptionBuilder::new()
+            vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(0)
                 .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(0),
-            vk::VertexInputAttributeDescriptionBuilder::new()
+                .offset(0)
+                .build(),
+            vk::VertexInputAttributeDescription::builder()
                 .binding(0)
                 .location(1)
                 .format(vk::Format::R32_UINT)
-                .offset(std::mem::size_of::<[f32; 3]>().try_into().unwrap()),
+                .offset(std::mem::size_of::<[f32; 3]>().try_into().unwrap())
+                .build(),
         ];
         VertexInfoDescription {
             bindings,
@@ -658,13 +669,13 @@ fn color_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
         device.clone(),
         include_bytes!("../../shaders/color.frag.spv"),
         String::from(label!("RgbPipelineFragmentShader")),
-        vk::ShaderStageFlagBits::FRAGMENT,
+        vk::ShaderStageFlags::FRAGMENT,
     );
     let vert_shader = ShaderModule::new(
         device.clone(),
         include_bytes!("../../shaders/color.vert.spv"),
         String::from("RgbPipelineVertexShader"),
-        vk::ShaderStageFlagBits::VERTEX,
+        vk::ShaderStageFlags::VERTEX,
     );
 
     Box::new(move |args| {
@@ -691,10 +702,16 @@ fn color_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
             **args.render_pass,
             &PipelineDesc {
                 view_port,
-                scissor: vk::Rect2DBuilder::new()
-                    .offset(vk::Offset2D { x: 0, y: 0 })
-                    .extent(vk::Extent2D { width, height }),
-                color_blend_attachment: Default::default(),
+                scissor: Arc::new(
+                    vk::Rect2D::builder()
+                        .offset(vk::Offset2D { x: 0, y: 0 })
+                        .extent(vk::Extent2D { width, height }),
+                ),
+                color_blend_attachment: PipelineColorBlendAttachmentState {
+                    blend_enable: vk::FALSE,
+                    color_write_mask: vk::ColorComponentFlags::RGBA,
+                    ..Default::default()
+                },
                 shader_stages: &shader_stages,
                 input_assembly_state: InputAssemblyState {
                     topology: vk::PrimitiveTopology::TRIANGLE_LIST,
@@ -706,10 +723,11 @@ fn color_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
                 },
                 multisample_state: MultiSamplingState {},
                 layout: Arc::clone(&pipeline_layout),
-                depth_stencil: DepthStencilInfo {
-                    write: true,
-                    test: Some(vk::CompareOp::LESS),
-                },
+                depth_stencil: PipelineDepthStencilStateCreateInfo::builder()
+                    .depth_write_enable(true)
+                    .depth_compare_op(vk::CompareOp::LESS)
+                    .depth_test_enable(true)
+                    .build(),
             },
             &label!("RgbPipeline"),
         )
@@ -721,13 +739,13 @@ fn line_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
         device.clone(),
         include_bytes!("../../shaders/line.frag.spv"),
         String::from(label!("LinePipelineFragmentShader")),
-        vk::ShaderStageFlagBits::FRAGMENT,
+        vk::ShaderStageFlags::FRAGMENT,
     );
     let vert_shader = ShaderModule::new(
         device.clone(),
         include_bytes!("../../shaders/line.vert.spv"),
         String::from("LinePipelineVertexShader"),
-        vk::ShaderStageFlagBits::VERTEX,
+        vk::ShaderStageFlags::VERTEX,
     );
 
     Box::new(move |args| {
@@ -754,9 +772,11 @@ fn line_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
             **args.render_pass,
             &PipelineDesc {
                 view_port,
-                scissor: vk::Rect2DBuilder::new()
-                    .offset(vk::Offset2D { x: 0, y: 0 })
-                    .extent(vk::Extent2D { width, height }),
+                scissor: Arc::new(
+                    vk::Rect2D::builder()
+                        .offset(vk::Offset2D { x: 0, y: 0 })
+                        .extent(vk::Extent2D { width, height }),
+                ),
                 color_blend_attachment: Default::default(),
                 shader_stages: &shader_stages,
                 input_assembly_state: InputAssemblyState {
@@ -769,10 +789,11 @@ fn line_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
                 },
                 multisample_state: MultiSamplingState {},
                 layout: Arc::clone(&pipeline_layout),
-                depth_stencil: DepthStencilInfo {
-                    write: true,
-                    test: Some(vk::CompareOp::LESS),
-                },
+                depth_stencil: PipelineDepthStencilStateCreateInfo::builder()
+                    .depth_write_enable(true)
+                    .depth_compare_op(vk::CompareOp::LESS)
+                    .depth_test_enable(true)
+                    .build(),
             },
             &label!("RgbPipeline"),
         )

@@ -6,14 +6,13 @@ use crate::{
     handles::{Allocator, Device, ImageView, Sampler},
     TransferContext,
 };
-use erupt::vk;
+use ash::vk;
 use std::sync::Arc;
-use vk_mem_3_erupt as vma;
+use vma::Alloc;
 
-#[derive(Debug)]
 pub struct Allocated {
     image: vk::Image,
-    allocation: vk_mem_3_erupt::Allocation,
+    allocation: vma::Allocation,
     allocator: Arc<Allocator>,
     name: String,
     width: u32,
@@ -41,13 +40,13 @@ impl Allocated {
         extent: vk::Extent3D,
         tiling: vk::ImageTiling,
     ) -> vk::ImageCreateInfoBuilder<'static> {
-        vk::ImageCreateInfoBuilder::new()
-            .image_type(vk::ImageType::_2D)
+        vk::ImageCreateInfo::builder()
+            .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(extent)
             .mip_levels(1)
             .array_layers(1)
-            .samples(vk::SampleCountFlagBits::_1)
+            .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(tiling)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .usage(usage_flags)
@@ -58,14 +57,14 @@ impl Allocated {
         format: vk::Format,
         aspect: vk::ImageAspectFlags,
     ) -> vk::ImageViewCreateInfoBuilder<'a> {
-        let subresource_range = vk::ImageSubresourceRangeBuilder::new()
+        let subresource_range = vk::ImageSubresourceRange::builder()
             .base_mip_level(0)
             .level_count(1)
             .base_array_layer(0)
             .layer_count(1)
             .aspect_mask(aspect);
-        vk::ImageViewCreateInfoBuilder::new()
-            .view_type(vk::ImageViewType::_2D)
+        vk::ImageViewCreateInfo::builder()
+            .view_type(vk::ImageViewType::TYPE_2D)
             .image(**self)
             .format(format)
             .subresource_range(*subresource_range)
@@ -82,9 +81,10 @@ impl Allocated {
         let allocation_info = vma::AllocationCreateInfo {
             usage: vma::MemoryUsage::AutoPreferDevice,
             required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            ..vk_mem_3_erupt::AllocationCreateInfo::default()
+            ..vma::AllocationCreateInfo::default()
         };
-        let (image, allocation, _) = allocator.create_image(&info, &allocation_info).unwrap();
+        let (image, allocation) =
+            unsafe { allocator.create_image(&info, &allocation_info) }.unwrap();
         let width = extent.width;
         let height = extent.height;
         log_resource_created("AllocatedImage", &format!("{} {}x{}", name, width, height));
@@ -110,7 +110,7 @@ impl Allocated {
         let image_size = width * height * 4;
         let image_format = vk::Format::R8G8B8A8_SRGB;
         assert_eq!(data.len(), image_size as usize);
-        let buffer_info = vk::BufferCreateInfoBuilder::new()
+        let buffer_info = vk::BufferCreateInfo::builder()
             .size(u64::from(image_size))
             .usage(vk::BufferUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
@@ -119,7 +119,7 @@ impl Allocated {
             image_loader.allocator.clone(),
             *buffer_info,
             vma::MemoryUsage::AutoPreferHost,
-            erupt::vk1_0::MemoryPropertyFlags::HOST_VISIBLE,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
             vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             label!("ImageStagingBuffer"),
         );
@@ -144,13 +144,13 @@ impl Allocated {
         image_loader
             .transfer_context
             .immediate_submit(|cmd| unsafe {
-                let range = vk::ImageSubresourceRangeBuilder::new()
+                let range = vk::ImageSubresourceRange::builder()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .base_mip_level(0)
                     .level_count(1)
                     .base_array_layer(0)
                     .layer_count(1);
-                let image_barrier_transfer = vk::ImageMemoryBarrierBuilder::new()
+                let image_barrier_transfer = vk::ImageMemoryBarrier::builder()
                     .old_layout(vk::ImageLayout::UNDEFINED)
                     .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                     .image(*image)
@@ -164,14 +164,14 @@ impl Allocated {
                     vk::DependencyFlags::empty(),
                     &[],
                     &[],
-                    &[image_barrier_transfer],
+                    &[*image_barrier_transfer],
                 );
-                let image_subresource = vk::ImageSubresourceLayersBuilder::new()
+                let image_subresource = vk::ImageSubresourceLayers::builder()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .mip_level(0)
                     .base_array_layer(0)
                     .layer_count(1);
-                let copy_region = vk::BufferImageCopyBuilder::new()
+                let copy_region = vk::BufferImageCopy::builder()
                     .buffer_offset(0)
                     .buffer_row_length(0)
                     .buffer_image_height(0)
@@ -182,7 +182,7 @@ impl Allocated {
                     *staging_buffer,
                     *image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[copy_region],
+                    &[*copy_region],
                 );
 
                 let image_barrier_to_read_optimal = image_barrier_transfer
@@ -193,14 +193,14 @@ impl Allocated {
                 image_loader.device.cmd_pipeline_barrier(
                     cmd,
                     vk::PipelineStageFlags::TRANSFER,
-    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
                     vk::DependencyFlags::empty(),
                     &[],
                     &[],
-                    &[image_barrier_to_read_optimal],
+                    &[*image_barrier_to_read_optimal],
                 );
 
-                let ownership_transfer_barrier = vk::ImageMemoryBarrierBuilder::new()
+                let ownership_transfer_barrier = vk::ImageMemoryBarrier::builder()
                     .image(*image)
                     .subresource_range(*range)
                     .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
@@ -215,7 +215,7 @@ impl Allocated {
                     vk::DependencyFlags::empty(),
                     &[],
                     &[],
-                    &[ownership_transfer_barrier],
+                    &[*ownership_transfer_barrier],
                 );
             });
         image
@@ -228,7 +228,7 @@ impl Drop for Allocated {
             "AllocatedImage",
             &format!("{} {}x{}", self.name, self.width, self.height),
         );
-        self.allocator.destroy_image(self.image, &self.allocation);
+        unsafe { self.allocator.destroy_image(self.image, &mut self.allocation); }
     }
 }
 
@@ -257,17 +257,17 @@ impl Texture {
             None,
         );
         let mut set = descriptor_set_manager.allocate(&texture_set_layout);
-        let image_info = vk::DescriptorImageInfoBuilder::new()
+        let image_info = vk::DescriptorImageInfo::builder()
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .image_view(**view)
             .sampler(**sampler);
-        let image_info = &[image_info];
-        let image_write = vk::WriteDescriptorSetBuilder::new()
+        let image_info = &[*image_info];
+        let image_write = vk::WriteDescriptorSet::builder()
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .dst_binding(0)
             .dst_set(*set)
             .image_info(image_info);
-        unsafe { device.update_descriptor_sets(&[image_write], &[]) };
+        unsafe { device.update_descriptor_sets(&[*image_write], &[]) };
         set.attach_resources(Box::new(Arc::clone(&view)));
         set.attach_resources(Box::new(Arc::clone(&sampler)));
         let set = Arc::new(set);

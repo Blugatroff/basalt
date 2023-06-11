@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-erupt = "0.23.0"
 cgmath = "0.18.0"
 tobj = "4.0"
 structopt = "0.3"
@@ -17,7 +16,11 @@ colored = "2"
 shaders = { path = "../shaders/" }
 slab = "0.4.8"
 puffin = "0.13.0"
-vk-mem-3-erupt = "0.6.0"
+ash = "0.37.2"
+cstr = "0.2.11"
+ash-window = "0.12.0"
+raw-window-handle = "0.5.2"
+vma = { git = "https://github.com/dust-engine/vk-mem-rs.git" }
 
 [dependencies.sdl2]
 git = "https://github.com/Rust-SDL2/rust-sdl2"

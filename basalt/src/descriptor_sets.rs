@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
-    ops::Deref,
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -9,7 +8,7 @@ use crate::{
     handles::{Device, ShaderModule},
     utils::{log_resource_created, log_resource_dropped},
 };
-use erupt::vk;
+use ash::vk;
 
 #[derive(Debug)]
 pub struct DescriptorSetLayout {
@@ -67,7 +66,7 @@ impl DescriptorSetLayoutBinding {
 
 impl<'a> From<&'a DescriptorSetLayoutBinding> for vk::DescriptorSetLayoutBindingBuilder<'a> {
     fn from(val: &'a DescriptorSetLayoutBinding) -> Self {
-        let mut builder = vk::DescriptorSetLayoutBindingBuilder::new()
+        let mut builder = vk::DescriptorSetLayoutBinding::builder()
             .binding(val.binding)
             .descriptor_type(val.ty)
             .stage_flags(val.stage_flags)
@@ -86,7 +85,7 @@ impl DescriptorSetLayout {
         for descriptor in &reflection.descriptors {
             let set = descriptor.set;
             let descriptor =
-                DescriptorSetLayoutBinding::from_reflection(descriptor, shader.stage().bitmask());
+                DescriptorSetLayoutBinding::from_reflection(descriptor, shader.stage());
             sets.entry(set).or_insert_with(Vec::new).push(descriptor);
         }
         sets.into_iter()
@@ -100,20 +99,21 @@ impl DescriptorSetLayout {
     ) -> Self {
         let binding_builders = bindings
             .iter()
-            .map(Into::<vk::DescriptorSetLayoutBindingBuilder<'_>>::into)
+            .map(|d| Into::<vk::DescriptorSetLayoutBindingBuilder<'_>>::into(d).build())
             .collect::<Vec<_>>();
         let layout_create_flags = vk::DescriptorSetLayoutCreateFlags::empty();
-        let mut create_info = vk::DescriptorSetLayoutCreateInfoBuilder::new()
+        let mut create_info = vk::DescriptorSetLayoutCreateInfo::builder()
             .bindings(&binding_builders)
             .flags(layout_create_flags);
 
         let layout_binding_flags = layout_binding_flags.map(|layout_binding_flags| {
-            vk::DescriptorSetLayoutBindingFlagsCreateInfoBuilder::new()
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
                 .binding_flags(layout_binding_flags)
+                .build()
         });
         create_info.p_next = layout_binding_flags
             .as_ref()
-            .map(|p| p.deref() as *const vk::DescriptorSetLayoutBindingFlagsCreateInfo)
+            .map(|p| p as *const vk::DescriptorSetLayoutBindingFlagsCreateInfo)
             .unwrap_or(std::ptr::null::<
                 vk::DescriptorSetLayoutBindingFlagsCreateInfo,
             >())
@@ -154,13 +154,12 @@ impl DescriptorPoolInner {
             .iter()
             .map(|(ty, count)| {
                 vk::DescriptorPoolSize {
-                    _type: *ty,
+                    ty: *ty,
                     descriptor_count: *count,
                 }
-                .into_builder()
             })
             .collect::<Vec<_>>();
-        let info = vk::DescriptorPoolCreateInfoBuilder::new()
+        let info = vk::DescriptorPoolCreateInfo::builder()
             .pool_sizes(&pool_size_builders)
             .max_sets(max_sets);
         let pool_sizes: Vec<(vk::DescriptorType, u32)> =
@@ -221,7 +220,7 @@ impl DescriptorPoolInner {
             return None;
         }
         let set_layouts = &[**layout];
-        let alloc_info = vk::DescriptorSetAllocateInfoBuilder::new()
+        let alloc_info = vk::DescriptorSetAllocateInfo::builder()
             .descriptor_pool(self.pool)
             .set_layouts(set_layouts);
 
