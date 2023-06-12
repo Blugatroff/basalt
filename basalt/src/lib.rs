@@ -16,15 +16,14 @@ macro_rules! label {
         concat!(file!(), ":", line!())
     };
 }
+pub use ash::vk;
 use cgmath::Matrix4;
 use cgmath::SquareMatrix;
 use cgmath::Vector3;
 use cgmath::Vector4;
-pub use vma;
 pub use descriptor_sets::DescriptorSetLayout;
 pub use descriptor_sets::DescriptorSetLayoutBinding;
 pub use descriptor_sets::DescriptorSetManager;
-pub use ash::vk;
 use frame::FrameDataMut;
 pub use handles::Allocator;
 pub use handles::CommandPool;
@@ -47,6 +46,7 @@ pub use utils::DepthStencilInfo;
 pub use utils::InputAssemblyState;
 pub use utils::MultiSamplingState;
 pub use utils::RasterizationState;
+pub use vma;
 pub mod buffer;
 pub mod image;
 pub use descriptor_sets::DescriptorSet;
@@ -65,7 +65,7 @@ use crate::utils::create_indirect_buffer;
 use crate::utils::create_sync_objects;
 use frame::FrameData;
 use frame::Frames;
-use handles::{Fence, ImageView, Instance, RenderPass, Surface, Swapchain};
+use handles::{Fence, ImageView, RenderPass, Surface, Swapchain};
 use std::fmt::Debug;
 use std::sync::Mutex;
 use std::{
@@ -188,7 +188,7 @@ impl TransferContext {
         unsafe {
             let fence = self.fence.lock().unwrap();
             let command_pool = self.command_pool.lock().unwrap();
-            
+
             self.device.reset_fences(&[**fence]).unwrap();
             let alloc_info = vk::CommandBufferAllocateInfo::builder()
                 .command_buffer_count(1)
@@ -265,7 +265,6 @@ pub struct Renderer {
     physical_device: vk::PhysicalDevice,
     allocator: Arc<Allocator>,
     device: Arc<Device>,
-    instance: Arc<Instance>,
     /// This field must be dropped last because other fields might rely on the objects inside being alive.
     #[allow(dead_code)]
     keep_alive: Vec<Box<dyn std::any::Any + 'static>>,
@@ -284,21 +283,19 @@ impl Renderer {
 
         let (instance, entry, mut device_extensions) =
             create_instance(&w, validation_layers, &messenger_info);
-            
+
         device_extensions.push(vk::KhrShaderDrawParametersFn::name().as_ptr());
         device_extensions.push(vk::KhrDrawIndirectCountFn::name().as_ptr());
         //device_extensions.push(vk::KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
         //device_extensions.push(vk::EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
-        let mut device_layers: Vec<*const i8> = Vec::new();
 
         let messenger = if validation_layers {
-            device_layers.push(b"VK_LAYER_KHRONOS_validation\0" as *const u8 as *const i8);
             Some(DebugUtilsMessenger::new(&entry, &instance, &messenger_info))
         } else {
             None
         };
         let instance = Arc::new(instance);
-        let surface = Surface::new(&entry, instance.clone(), &w);
+        let surface = Surface::new(&entry, &instance, &w);
         let present_mode = vk::PresentModeKHR::MAILBOX;
 
         let (
@@ -325,17 +322,15 @@ impl Renderer {
             graphics_family,
             transfer_family,
             &device_extensions,
-            &device_layers,
             physical_device,
         );
         let device = Arc::new(device);
         let (swapchain, swapchain_images, swapchain_image_views, max_image_count) =
             create_swapchain(
-                &instance,
+                device.clone(),
                 physical_device,
                 &surface,
                 format,
-                &device,
                 present_mode,
                 None,
                 frames_in_flight as u32,
@@ -356,7 +351,7 @@ impl Renderer {
         let (render_fences, present_semaphores, render_semaphores) =
             create_sync_objects(&device, frames_in_flight);
 
-        let allocator_info = vma::AllocatorCreateInfo::new(&*instance, &*device, physical_device);
+        let allocator_info = vma::AllocatorCreateInfo::new(&instance, &device, physical_device);
 
         let allocator = Arc::new(Allocator::new(device.clone(), allocator_info));
         let depth_images: Vec<(Arc<image::Allocated>, Arc<image::Allocated>)> =
@@ -538,7 +533,7 @@ impl Renderer {
         let cull_shader = ShaderModule::new(
             device.clone(),
             include_bytes!("../../shaders/cull.comp.spv"),
-            String::from("CullShader"),
+            label!("CullShader").to_string(),
             vk::ShaderStageFlags::VERTEX,
         );
 
@@ -589,7 +584,6 @@ impl Renderer {
             physical_device,
             allocator,
             device,
-            instance,
             keep_alive,
         }
     }
@@ -742,11 +736,10 @@ impl Renderer {
     fn recreate_swapchain(&mut self) {
         let (swapchain, swapchain_images, swapchain_image_views, max_image_count) =
             create_swapchain(
-                &self.instance,
+                self.device.clone(),
                 self.physical_device,
                 &self.surface,
                 self.format,
-                &self.device,
                 self.present_mode,
                 Some(*self.swapchain),
                 self.frames_in_flight as u32,
@@ -850,7 +843,8 @@ impl Renderer {
         self.global_uniform.near = frustum.near_distance;
         self.global_uniform.far = frustum.far_distance;
 
-        let ptr = self.uniform_buffer.map();
+        let mapping = self.uniform_buffer.map::<u8>(self.uniform_buffer.size as usize);
+        let ptr = mapping.as_ptr();
         let global_uniform_offset: u32 = (pad_uniform_buffer_size(
             &self.physical_device_properties.limits,
             std::mem::size_of::<shaders::GlobalUniform>() as u64,
@@ -864,7 +858,6 @@ impl Renderer {
                 self.global_uniform,
             );
         }
-        self.uniform_buffer.unmap();
         global_uniform_offset
     }
     fn batch_renderables<'a, 'b, 'c>(
@@ -977,9 +970,9 @@ impl Renderer {
     }
     fn write_renderables(buffer: &mut buffer::Allocated, instancing_batches: &[InstancingBatch]) {
         puffin::profile_function!();
-        let ptr = buffer.map().cast::<shaders::Object>() as *mut shaders::Object;
         let num_renderables = instancing_batches.iter().map(|b| b.renderables.len()).sum();
-        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, num_renderables) };
+        let mut slice = buffer.map::<shaders::Object>(num_renderables);
+        //let slice = unsafe { std::slice::from_raw_parts_mut(ptr, num_renderables) };
         let mut i = 0;
         for (batch_id, batch) in instancing_batches.iter().enumerate() {
             slice[batch_id].first_instance = batch.first_instance;
@@ -995,12 +988,10 @@ impl Renderer {
                 i += 1;
             }
         }
-        buffer.unmap();
     }
     fn write_meshes(buffer: &buffer::Allocated, meshes: &[Arc<Mesh>]) {
         puffin::profile_function!();
-        let ptr = buffer.map().cast::<shaders::Mesh>() as *mut shaders::Mesh;
-        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, meshes.len()) };
+        let mut slice = buffer.map::<shaders::Mesh>(meshes.len());
         for (i, mesh) in meshes.iter().enumerate() {
             slice[i] = shaders::Mesh {
                 sphere_bounds: mesh.bounds.sphere_bounds,
@@ -1009,7 +1000,6 @@ impl Renderer {
                 vertex_offset: mesh.vertex_start.try_into().unwrap(),
             };
         }
-        buffer.unmap();
     }
     fn wait_for_next_frame(&mut self) -> (usize, frame::FrameDataMut) {
         puffin::profile_function!();
@@ -1145,7 +1135,9 @@ impl Renderer {
     fn begin_command_buffer(&self, frame: &FrameData) {
         unsafe {
             let cmd = *frame.command_buffer;
-            self.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).unwrap();
+            self.device
+                .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+                .unwrap();
             let begin_info = vk::CommandBufferBeginInfo::builder()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             self.device.begin_command_buffer(cmd, &begin_info).unwrap();
@@ -1295,9 +1287,13 @@ impl Renderer {
             .wait_semaphores(wait_semaphores)
             .image_indices(image_indices);
         let queue = self.graphics_queue.lock().unwrap();
-        let res = unsafe { self.swapchain.loader().queue_present(**queue, &present_info) };
-        if res.is_err() {
-            log::warn!("{:#?}", res);
+        let res = unsafe {
+            self.swapchain
+                .loader()
+                .queue_present(**queue, &present_info)
+        };
+        if let Err(err) = res {
+            log::warn!("{err:#?}");
         }
     }
     pub fn render<'a>(
@@ -1355,7 +1351,7 @@ impl Renderer {
                 Err(_) => return None,
             };
         Self::write_renderables(frame.renderables_buffer, &batches);
-        Self::write_meshes(&frame.mesh_buffer, &meshes);
+        Self::write_meshes(frame.mesh_buffer, &meshes);
         *frame.cleanup = Some(Box::new(|| {
             drop(meshes);
             drop(custom_sets);
@@ -1368,6 +1364,7 @@ impl Renderer {
         let cmd = self.begin_render_pass(frame_index, swapchain_image_index, [0.15, 0.6, 0.9, 1.0]);
         let indirect_draws = Self::batch_batches(&batches);
         self.record_draws(frame_index, global_uniform_offset, &indirect_draws, cmd);
+        drop(materials); // drop the MutexGuard as soon as possible
         self.submit_cmd(frame_index, cmd);
         self.present(frame_index, swapchain_image_index);
         let cpu_work_time = cpu_work_start.elapsed();

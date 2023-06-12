@@ -4,16 +4,45 @@ use crate::{
     TransferContext,
 };
 use ash::vk;
-use std::{sync::Arc, cell::UnsafeCell};
+use std::{
+    ops::{Deref, DerefMut},
+    sync::{Arc, Mutex, MutexGuard},
+};
 use vma::Alloc;
 
 pub struct Allocated {
     buffer: vk::Buffer,
-    allocation: vma::Allocation,
+    allocation: Mutex<vma::Allocation>,
     allocator: Arc<Allocator>,
     pub size: u64,
     usage: vk::BufferUsageFlags,
     name: &'static str,
+}
+
+pub struct Mapped<'buffer, T> {
+    allocator: &'buffer Allocator,
+    allocation: MutexGuard<'buffer, vma::Allocation>,
+    data: &'buffer mut [T],
+}
+
+impl<'buffer, T> Deref for Mapped<'buffer, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        self.data
+    }
+}
+
+impl<'buffer, T> DerefMut for Mapped<'buffer, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.data
+    }
+}
+
+impl<'buffer, T> Drop for Mapped<'buffer, T> {
+    fn drop(&mut self) {
+        unsafe { self.allocator.unmap_memory(&mut self.allocation) };
+    }
 }
 
 impl Allocated {
@@ -37,6 +66,7 @@ impl Allocated {
                 .create_buffer(&buffer_info, &vmaalloc_info)
                 .unwrap()
         };
+        let allocation = Mutex::new(allocation);
         let size = buffer_info.size;
         let usage = buffer_info.usage;
         log_resource_created("Buffer", &format!("{} {} {:?}", name, size, usage));
@@ -49,15 +79,22 @@ impl Allocated {
             name,
         }
     }
-    unsafe fn make_mut<T>(r: &T) -> &mut T {
-        &mut *(r as *const T as *mut T)
+    pub fn map<T: Copy>(&self, length: usize) -> Mapped<'_, T> {
+        self.map_with_offset(0, length)
     }
-    pub fn map(&self) -> *const u8 {
-        unsafe { self.allocator.map_memory(Self::make_mut(&self.allocation)) }.unwrap()
-    }
-    pub fn unmap(&self) {
-        unsafe {
-            self.allocator.unmap_memory(Self::make_mut(&self.allocation));
+    pub fn map_with_offset<T: Copy>(&self, byte_offset: usize, length: usize) -> Mapped<'_, T> {
+        assert_ne!(std::mem::size_of::<T>(), 0);
+
+        let mut allocation = self.allocation.lock().unwrap();
+        let ptr = unsafe { self.allocator.map_memory(&mut allocation) }.unwrap();
+        let ptr = unsafe { ptr.add(byte_offset) };
+        let ptr = ptr as *mut T;
+        let len = length.min((self.size as usize - byte_offset) / std::mem::size_of::<T>());
+        let data = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+        Mapped {
+            allocator: &self.allocator,
+            data,
+            allocation,
         }
     }
     pub fn copy_to_device_local(
@@ -102,6 +139,9 @@ impl Drop for Allocated {
             "Buffer",
             &format!("{} {} {:?}", self.name, self.size, self.usage),
         );
-        unsafe { self.allocator.destroy_buffer(self.buffer, &mut self.allocation); }
+        let allocation = &mut self.allocation.lock().unwrap();
+        unsafe {
+            self.allocator.destroy_buffer(self.buffer, allocation);
+        }
     }
 }

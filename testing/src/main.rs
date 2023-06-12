@@ -134,7 +134,7 @@ impl State {
         ];
         let threads = std::env::args()
             .nth(1)
-            .unwrap_or_else(String::new)
+            .unwrap_or_default()
             .parse::<u32>()
             .unwrap_or(0);
         let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -466,7 +466,7 @@ impl State {
                     custom_set: r.material.custom_set.as_ref(),
                     custom_id: 0,
                     uncullable: false,
-                    pipeline: &*r.material.pipeline,
+                    pipeline: &r.material.pipeline,
                 })
                 .chain(self.egui.renderables()),
             view_proj,
@@ -508,13 +508,13 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
     let vert_shader = ShaderModule::new(
         device.clone(),
         include_bytes!("../../shaders/mesh.vert.spv"),
-        String::from("MeshPipelineVertexShader"),
+        label!("MeshPipelineVertexShader").to_string(),
         vk::ShaderStageFlags::VERTEX,
     );
     let frag_shader = ShaderModule::new(
         device.clone(),
         include_bytes!("../../shaders/mesh.frag.spv"),
-        String::from("MeshPipelineFragmentShader"),
+        label!("MeshPipelineFragmentShader").to_string(),
         vk::ShaderStageFlags::FRAGMENT,
     );
 
@@ -668,13 +668,13 @@ fn color_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
     let frag_shader = ShaderModule::new(
         device.clone(),
         include_bytes!("../../shaders/color.frag.spv"),
-        String::from(label!("RgbPipelineFragmentShader")),
+        label!("RgbPipelineFragmentShader").to_string(),
         vk::ShaderStageFlags::FRAGMENT,
     );
     let vert_shader = ShaderModule::new(
         device.clone(),
         include_bytes!("../../shaders/color.vert.spv"),
-        String::from("RgbPipelineVertexShader"),
+        label!("RgbPipelineVertexShader").to_string(),
         vk::ShaderStageFlags::VERTEX,
     );
 
@@ -738,13 +738,13 @@ fn line_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
     let frag_shader = ShaderModule::new(
         device.clone(),
         include_bytes!("../../shaders/line.frag.spv"),
-        String::from(label!("LinePipelineFragmentShader")),
+        label!("LinePipelineFragmentShader").to_string(),
         vk::ShaderStageFlags::FRAGMENT,
     );
     let vert_shader = ShaderModule::new(
         device.clone(),
         include_bytes!("../../shaders/line.vert.spv"),
-        String::from("LinePipelineVertexShader"),
+        label!("LinePipelineVertexShader").to_string(),
         vk::ShaderStageFlags::VERTEX,
     );
 

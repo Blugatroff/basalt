@@ -30,7 +30,7 @@ impl std::ops::Deref for DescriptorSetLayout {
     }
 }
 
-impl<'a> Drop for DescriptorSetLayout {
+impl Drop for DescriptorSetLayout {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_descriptor_set_layout(self.layout, None);
@@ -116,8 +116,7 @@ impl DescriptorSetLayout {
             .map(|p| p as *const vk::DescriptorSetLayoutBindingFlagsCreateInfo)
             .unwrap_or(std::ptr::null::<
                 vk::DescriptorSetLayoutBindingFlagsCreateInfo,
-            >())
-            as *const std::ffi::c_void;
+            >()) as *const std::ffi::c_void;
         let layout = unsafe { device.create_descriptor_set_layout(&create_info, None) }.unwrap();
         Self {
             layout,
@@ -152,11 +151,9 @@ impl DescriptorPoolInner {
         }
         let pool_size_builders = sizes
             .iter()
-            .map(|(ty, count)| {
-                vk::DescriptorPoolSize {
-                    ty: *ty,
-                    descriptor_count: *count,
-                }
+            .map(|(ty, count)| vk::DescriptorPoolSize {
+                ty: *ty,
+                descriptor_count: *count,
             })
             .collect::<Vec<_>>();
         let info = vk::DescriptorPoolCreateInfo::builder()
@@ -256,16 +253,15 @@ impl DescriptorPool {
         }
     }
 
-    pub fn allocate_set(&self, layout: &DescriptorSetLayout) -> Option<DescriptorSet> {
+    pub fn allocate_set(
+        &self,
+        layout: &DescriptorSetLayout,
+        name: String,
+    ) -> Option<DescriptorSet> {
         let mut inner = self.inner.lock().unwrap();
         let set = inner.allocate_set(layout);
         drop(inner);
-        set.map(|set| DescriptorSet {
-            set,
-            pool: self.inner.clone(),
-            resources: Vec::new(),
-            phantom: PhantomData::default(),
-        })
+        set.map(|set| DescriptorSet::new(set, self.inner.clone(), name))
     }
 }
 
@@ -281,12 +277,9 @@ impl DescriptorSetManager {
             pools: RwLock::new(Vec::new()),
         }
     }
-    pub fn allocate(
-        &self,
-        set_layout: &DescriptorSetLayout,
-    ) -> DescriptorSet {
+    pub fn allocate(&self, set_layout: &DescriptorSetLayout, name: &str) -> DescriptorSet {
         for pool in self.pools.read().unwrap().iter() {
-            if let Some(set) = DescriptorPool::allocate_set(pool, set_layout) {
+            if let Some(set) = DescriptorPool::allocate_set(pool, set_layout, String::from(name)) {
                 return set;
             }
         }
@@ -299,11 +292,12 @@ impl DescriptorSetManager {
                 .map(|b| (b.ty, b.count * 8))
                 .collect::<Vec<_>>(),
         ));
-        self.allocate(set_layout)
+        self.allocate(set_layout, name)
     }
 }
 
 pub struct DescriptorSet {
+    name: String,
     set: vk::DescriptorSet,
     pool: Arc<Mutex<DescriptorPoolInner>>,
     resources: Vec<Box<dyn std::any::Any>>,
@@ -324,6 +318,20 @@ impl DescriptorSet {
     pub fn attach_resources(&mut self, r: Box<dyn std::any::Any>) {
         self.resources.push(r);
     }
+
+    fn new(
+        set: vk::DescriptorSet,
+        pool: Arc<Mutex<DescriptorPoolInner>>,
+        name: String,
+    ) -> DescriptorSet {
+        Self {
+            name,
+            set,
+            pool,
+            resources: Vec::new(),
+            phantom: PhantomData,
+        }
+    }
 }
 
 impl std::ops::Deref for DescriptorSet {
@@ -335,7 +343,7 @@ impl std::ops::Deref for DescriptorSet {
 
 impl Drop for DescriptorSet {
     fn drop(&mut self) {
-        log_resource_dropped("DescriptorSet", "");
+        log_resource_dropped("DescriptorSet", &self.name);
         self.pool.lock().unwrap().free_set();
     }
 }

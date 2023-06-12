@@ -1,9 +1,11 @@
 use basalt::{
     buffer,
     image::{Loader, Texture},
-    label, vk::{self, PipelineDepthStencilStateCreateInfo}, Allocator, DescriptorSetLayout,
-    InputAssemblyState, Mesh, MultiSamplingState, Pipeline, PipelineDesc, PipelineHandle,
-    PipelineLayout, RasterizationState, Renderable, Renderer, Sampler, ShaderModule, vma,
+    label,
+    vk::{self, PipelineDepthStencilStateCreateInfo},
+    vma, Allocator, DescriptorSetLayout, InputAssemblyState, Mesh, MultiSamplingState, Pipeline,
+    PipelineDesc, PipelineHandle, PipelineLayout, RasterizationState, Renderable, Renderer,
+    Sampler, ShaderModule,
 };
 use egui::FontImage;
 use sdl2::event::Event;
@@ -208,8 +210,10 @@ impl EruptEgui {
                     },
                     multisample_state: MultiSamplingState {},
                     layout: Arc::clone(&pipeline_layout),
-                    depth_stencil: PipelineDepthStencilStateCreateInfo::builder().depth_write_enable(false).depth_test_enable(false).build()
-                         ,
+                    depth_stencil: PipelineDepthStencilStateCreateInfo::builder()
+                        .depth_write_enable(false)
+                        .depth_test_enable(false)
+                        .build(),
                 },
                 &label!("EguiPipeline"),
             )
@@ -349,7 +353,7 @@ impl EruptEgui {
             .map(|(mesh, custom_set, transform)| Renderable {
                 transform,
                 mesh,
-                custom_set: Some(&*custom_set),
+                custom_set: Some(custom_set),
                 custom_id: 0,
                 uncullable: true,
                 pipeline: &self.pipeline,

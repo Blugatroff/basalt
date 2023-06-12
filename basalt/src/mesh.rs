@@ -185,7 +185,8 @@ impl Mesh {
         {
             return None;
         }
-        let ptr = unsafe { buffer.map().add(offset) };
+        let mapping = buffer.map_with_offset::<u8>(offset, buffer.size as usize);
+        let ptr = mapping.as_ptr();
         unsafe {
             std::ptr::copy_nonoverlapping(vertices.as_ptr(), ptr as *mut V, vertices.len());
         }
@@ -193,7 +194,7 @@ impl Mesh {
             let ptr = ptr.add(vertices.len() * std::mem::size_of::<V>()) as *mut u32;
             std::ptr::copy_nonoverlapping(indices.as_ptr(), ptr, indices.len());
         }
-        buffer.unmap();
+        drop(mapping);
         let vertex_type = std::any::TypeId::of::<V>();
         let vertex_name = std::any::type_name::<V>();
         Some((
@@ -299,11 +300,9 @@ impl Mesh {
                 let regions = &[*region];
                 device.cmd_copy_buffer(cmd, **mesh.buffer, **staging_buffer, regions);
                 mesh.index_start +=
-                    TryInto::<u32>::try_into(offset / std::mem::size_of::<u32>() as u64)
-                        .unwrap();
+                    TryInto::<u32>::try_into(offset / std::mem::size_of::<u32>() as u64).unwrap();
                 mesh.vertex_start +=
-                    TryInto::<u32>::try_into(offset / (mesh.vertex_type_size as u64))
-                        .unwrap();
+                    TryInto::<u32>::try_into(offset / (mesh.vertex_type_size as u64)).unwrap();
                 offset += mesh.buffer.size;
             }
         });

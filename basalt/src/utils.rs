@@ -1,5 +1,5 @@
 use crate::buffer;
-use crate::handles::{Device, Fence, Instance, Queue, QueueFamily, Semaphore, Trash, Surface};
+use crate::handles::{Device, Fence, Instance, Queue, QueueFamily, Semaphore, Surface, Trash};
 use crate::image;
 use crate::{
     debug_callback,
@@ -10,7 +10,6 @@ use crate::{
 };
 use ash::vk;
 use raw_window_handle::HasRawDisplayHandle;
-use std::any::Any;
 use std::{
     ffi::{CStr, CString},
     sync::Arc,
@@ -58,22 +57,6 @@ pub struct DepthStencilInfo {
     pub test: Option<vk::CompareOp>,
     /// disable / enable writing to the DepthBuffer
     pub write: bool,
-}
-
-impl DepthStencilInfo {
-    fn builder<'a>(&'a self) -> vk::PipelineDepthStencilStateCreateInfoBuilder<'a> {
-        let depth_test = self.test.is_some();
-        let depth_write = self.write;
-        let compare_op = self.test.unwrap_or(vk::CompareOp::ALWAYS);
-        vk::PipelineDepthStencilStateCreateInfo::builder()
-            .depth_test_enable(depth_test)
-            .depth_write_enable(depth_write)
-            .depth_compare_op(compare_op)
-            .depth_bounds_test_enable(false)
-            .min_depth_bounds(0.0)
-            .max_depth_bounds(1.0)
-            .stencil_test_enable(false)
-    }
 }
 
 pub const fn pad_uniform_buffer_size(
@@ -173,12 +156,6 @@ pub fn create_instance(
     }
     let entry = unsafe { ash::Entry::load() }.unwrap();
 
-    // log::info!(
-    //     "Vulkan Instance {}.{}.{}",
-    //     vk::api_version_major(entry.instance_version()),
-    //     vk::api_version_minor(entry.instance_version()),
-    //     vk::api_version_patch(entry.instance_version())
-    // );
     let instance_extensions = window
         .vulkan_instance_extensions()
         .unwrap()
@@ -212,6 +189,7 @@ pub fn create_instance(
             .cast::<std::ffi::c_void>();
     }
     let instance = Instance::new(&entry, &instance_info);
+
     (instance, entry, device_extensions)
 }
 
@@ -243,7 +221,7 @@ pub fn create_descriptor_sets(
     uniform_buffer: &buffer::Allocated,
     object_buffer: &buffer::Allocated,
 ) -> DescriptorSet {
-    let set = descriptor_set_manager.allocate(layout);
+    let set = descriptor_set_manager.allocate(layout, label!("BasaltInternalSet"));
 
     let global_uniform_buffer_info = vk::DescriptorBufferInfo::builder()
         .buffer(**uniform_buffer)
@@ -318,7 +296,6 @@ pub fn create_device_and_queue(
     graphics_queue_family: QueueFamily,
     transfer_queue_family: Option<QueueFamily>,
     device_extensions: &[*const i8],
-    device_layers: &[*const i8],
     physical_device: vk::PhysicalDevice,
 ) -> (Device, Queue, Option<Queue>) {
     let mut queue_info = vec![*vk::DeviceQueueCreateInfo::builder()
@@ -338,8 +315,7 @@ pub fn create_device_and_queue(
     let mut device_info = vk::DeviceCreateInfo::builder()
         .queue_create_infos(&queue_info)
         .enabled_features(&features)
-        .enabled_extension_names(device_extensions)
-        .enabled_layer_names(device_layers);
+        .enabled_extension_names(device_extensions);
 
     let indexing_features = vk::PhysicalDeviceDescriptorIndexingFeaturesEXT {
         shader_sampled_image_array_non_uniform_indexing: vk::TRUE,
@@ -352,7 +328,7 @@ pub fn create_device_and_queue(
         as *const vk::PhysicalDeviceDescriptorIndexingFeatures)
         .cast::<std::ffi::c_void>();
 
-    let device = Device::new(instance.clone(), physical_device, &device_info);
+    let device = Device::new(instance, physical_device, &device_info);
     let graphics_queue = Queue::new(
         unsafe { device.get_device_queue(graphics_queue_family.0, 0) },
         label!("GraphicsQueue"),
@@ -424,17 +400,20 @@ pub fn create_render_pass(device: Arc<Device>, format: vk::SurfaceFormatKHR) -> 
     RenderPass::new(device, &render_pass_info, label!("MainRenderPass"))
 }
 pub fn create_swapchain(
-    instance: &Instance,
+    device: Arc<Device>,
     physical_device: vk::PhysicalDevice,
     surface: &Surface,
     format: vk::SurfaceFormatKHR,
-    device: &Arc<Device>,
     present_mode: vk::PresentModeKHR,
     old_swapchain: Option<vk::SwapchainKHR>,
     swapchain_image_count: u32,
 ) -> (Swapchain, Vec<vk::Image>, Vec<ImageView>, u32) {
-    let surface_caps =
-        unsafe { surface.loader().get_physical_device_surface_capabilities(physical_device, **surface) }.unwrap();
+    let surface_caps = unsafe {
+        surface
+            .loader()
+            .get_physical_device_surface_capabilities(physical_device, **surface)
+    }
+    .unwrap();
     let mut image_count = swapchain_image_count.max(surface_caps.min_image_count);
     let max_image_count = surface_caps.max_image_count;
     if max_image_count > 0 && image_count > max_image_count {
@@ -458,7 +437,7 @@ pub fn create_swapchain(
             None => vk::SwapchainKHR::null(),
         });
 
-    let swapchain = Swapchain::new(instance.clone(), device.clone(), &swapchain_info, label!());
+    let swapchain = Swapchain::new(device.instance(), device.clone(), &swapchain_info, label!());
     let swapchain_images: Vec<vk::Image> =
         unsafe { swapchain.loader().get_swapchain_images(*swapchain) }
             .unwrap()
@@ -515,23 +494,22 @@ where
     I::IntoIter: Clone,
 {
     let depth_views = depth_views.into_iter().cycle();
-    let attachments: Vec<[([vk::ImageView; 2], Arc<dyn Any + Send + Sync>); 2]> =
-        swapchain_image_views
-            .into_iter()
-            .zip(depth_views)
-            .map(|(swapchain_image_view, (depth_view_1, depth_view_2))| {
-                [
-                    (
-                        [***swapchain_image_view, ***depth_view_1],
-                        Arc::new((swapchain_image_view.clone(), depth_view_1.clone())) as Trash,
-                    ),
-                    (
-                        [***swapchain_image_view, ***depth_view_2],
-                        Arc::new((swapchain_image_view.clone(), depth_view_2.clone())) as Trash,
-                    ),
-                ]
-            })
-            .collect::<Vec<[([vk::ImageView; 2], Trash); 2]>>();
+    let attachments: Vec<[([vk::ImageView; 2], Trash); 2]> = swapchain_image_views
+        .into_iter()
+        .zip(depth_views)
+        .map(|(swapchain_image_view, (depth_view_1, depth_view_2))| {
+            [
+                (
+                    [***swapchain_image_view, ***depth_view_1],
+                    Arc::new((swapchain_image_view.clone(), depth_view_1.clone())) as Trash,
+                ),
+                (
+                    [***swapchain_image_view, ***depth_view_2],
+                    Arc::new((swapchain_image_view.clone(), depth_view_2.clone())) as Trash,
+                ),
+            ]
+        })
+        .collect::<Vec<[([vk::ImageView; 2], Trash); 2]>>();
 
     let f = |(attachments, trash): (&[vk::ImageView; 2], Trash)| {
         let framebuffer_info = vk::FramebufferCreateInfo::builder()
@@ -829,7 +807,7 @@ pub fn create_cull_set(
     mesh_buffer: Arc<buffer::Allocated>,
     indirect_buffer: Arc<buffer::Allocated>,
 ) -> DescriptorSet {
-    let mut set = descriptor_set_manager.allocate(layout);
+    let mut set = descriptor_set_manager.allocate(layout, label!("CullSet"));
     let buffer_info = vk::DescriptorBufferInfo::builder()
         .buffer(**mesh_buffer)
         .offset(0)

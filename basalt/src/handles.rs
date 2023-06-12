@@ -78,7 +78,7 @@ impl ShaderModule {
         let mut shaders = reflection::Shader::from_spirv(spv).unwrap();
         assert_eq!(shaders.len(), 1);
         let shader = shaders.swap_remove(0);
-        log_resource_created("ShaderMode", &name);
+        log_resource_created("ShaderModule", &name);
         Self {
             module,
             device,
@@ -109,7 +109,7 @@ impl std::ops::Deref for ShaderModule {
 
 impl Drop for ShaderModule {
     fn drop(&mut self) {
-        log_resource_dropped("ShaderMode", &self.name);
+        log_resource_dropped("ShaderModule", &self.name);
         unsafe { self.device.destroy_shader_module(self.module, None) };
     }
 }
@@ -129,6 +129,9 @@ impl Device {
         };
         log_resource_created("Device", "");
         Self(Arc::new(device), instance)
+    }
+    pub fn instance(&self) -> &Arc<Instance> {
+        &self.1
     }
 }
 
@@ -165,7 +168,7 @@ impl DebugUtilsMessenger {
         instance: &Instance,
         messenger_info: &vk::DebugUtilsMessengerCreateInfoEXTBuilder,
     ) -> Self {
-        let debug_utils = DebugUtils::new(&entry, &instance);
+        let debug_utils = DebugUtils::new(entry, instance);
         let inner =
             unsafe { debug_utils.create_debug_utils_messenger(messenger_info, None) }.unwrap();
         log_resource_created("DebugUtilsMessenger", "");
@@ -185,6 +188,7 @@ impl Drop for DebugUtilsMessenger {
 
 pub struct Instance {
     instance: Arc<ash::Instance>,
+    name: String,
 }
 
 impl std::fmt::Debug for Instance {
@@ -195,10 +199,24 @@ impl std::fmt::Debug for Instance {
 
 impl Instance {
     pub fn new(entry: &ash::Entry, create_info: &vk::InstanceCreateInfo) -> Self {
-        let instance = unsafe { entry.create_instance(&create_info, None) }.unwrap();
+        let instance = unsafe { entry.create_instance(create_info, None) }.unwrap();
+        let version = match entry.try_enumerate_instance_version().unwrap() {
+            Some(version) => {
+                format!(
+                    " Vulkan {}.{}.{}",
+                    vk::api_version_major(version),
+                    vk::api_version_minor(version),
+                    vk::api_version_patch(version)
+                )
+            }
+            None => String::from(""),
+        };
         let instance = Arc::new(instance);
-        log_resource_created("Instance", "");
-        Self { instance }
+        log_resource_created("Instance", &version);
+        Self {
+            instance,
+            name: version,
+        }
     }
 }
 
@@ -211,7 +229,7 @@ impl std::ops::Deref for Instance {
 
 impl Drop for Instance {
     fn drop(&mut self) {
-        log_resource_dropped("Instance", "");
+        log_resource_dropped("Instance", &self.name);
         unsafe {
             self.instance.destroy_instance(None);
         }
@@ -484,17 +502,13 @@ pub struct Surface {
 }
 
 impl Surface {
-    pub fn new(
-        entry: &ash::Entry,
-        instance: Arc<Instance>,
-        window: &sdl2::video::Window,
-    ) -> Self {
-        let surface_loader = ash::extensions::khr::Surface::new(&*entry, &*instance);
+    pub fn new(entry: &ash::Entry, instance: &Instance, window: &sdl2::video::Window) -> Self {
+        let surface_loader = ash::extensions::khr::Surface::new(entry, instance);
         log_resource_created("Surface", "");
         let surface = unsafe {
             ash_window::create_surface(
-                &entry,
-                &instance,
+                entry,
+                instance,
                 window.raw_display_handle(),
                 window.raw_window_handle(),
                 None,
@@ -754,7 +768,6 @@ impl Drop for ImageView {
 pub struct Swapchain {
     swapchain_loader: ash::extensions::khr::Swapchain,
     swapchain: vk::SwapchainKHR,
-    device: Arc<Device>,
     name: String,
     trash: Option<Trash>,
 }
@@ -765,14 +778,13 @@ impl Swapchain {
         info: &vk::SwapchainCreateInfoKHRBuilder,
         name: impl Into<String>,
     ) -> Self {
-        let swapchain_loader = ash::extensions::khr::Swapchain::new(&instance, &device);
+        let swapchain_loader = ash::extensions::khr::Swapchain::new(instance, &device);
         let swapchain = unsafe { swapchain_loader.create_swapchain(info, None).unwrap() };
         let name = name.into();
         crate::utils::log_resource_created(stringify!(Swapchain), &name);
         Self {
             swapchain_loader,
             swapchain,
-            device,
             name,
             trash: None,
         }

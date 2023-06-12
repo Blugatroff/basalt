@@ -123,9 +123,9 @@ impl Allocated {
             vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
             label!("ImageStagingBuffer"),
         );
-        let ptr = staging_buffer.map() as *mut _;
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, image_size as usize) };
-        staging_buffer.unmap();
+        let mut staging_buffer_mapping = staging_buffer.map::<u8>(image_size as usize);
+        staging_buffer_mapping.copy_from_slice(data);
+        drop(staging_buffer_mapping);
 
         let image_extent = vk::Extent3D {
             width,
@@ -228,7 +228,10 @@ impl Drop for Allocated {
             "AllocatedImage",
             &format!("{} {}x{}", self.name, self.width, self.height),
         );
-        unsafe { self.allocator.destroy_image(self.image, &mut self.allocation); }
+        unsafe {
+            self.allocator
+                .destroy_image(self.image, &mut self.allocation);
+        }
     }
 }
 
@@ -256,7 +259,7 @@ impl Texture {
             }],
             None,
         );
-        let mut set = descriptor_set_manager.allocate(&texture_set_layout);
+        let mut set = descriptor_set_manager.allocate(&texture_set_layout, label!("TextureSet"));
         let image_info = vk::DescriptorImageInfo::builder()
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .image_view(**view)
