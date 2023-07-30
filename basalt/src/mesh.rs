@@ -1,11 +1,12 @@
+use std::any::TypeId;
+use std::sync::Arc;
+use ash::vk;
+use cgmath::InnerSpace;
+use bytemuck::AnyBitPattern;
 use crate::buffer;
 use crate::handles::Allocator;
 use crate::utils::round_to;
 use crate::TransferContext;
-use ash::vk;
-use cgmath::InnerSpace;
-use std::any::TypeId;
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct VertexInfoDescription {
@@ -24,7 +25,7 @@ impl VertexInfoDescription {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, AnyBitPattern)]
 #[repr(C)]
 pub struct DefaultVertex {
     pub position: cgmath::Vector3<f32>,
@@ -39,7 +40,7 @@ pub struct LoadingVertex {
     pub color: Option<[u8; 4]>,
 }
 
-pub trait Vertex: 'static {
+pub trait Vertex: 'static + AnyBitPattern {
     fn position(&self) -> cgmath::Vector3<f32>;
     fn description() -> VertexInfoDescription;
     fn new(_: LoadingVertex) -> Self
@@ -180,8 +181,8 @@ impl Mesh {
         }
         if buffer.size
             < (offset
-                + vertices.len() * std::mem::size_of::<V>()
-                + indices.len() * std::mem::size_of::<u32>()) as u64
+                + std::mem::size_of_val(vertices)
+                + std::mem::size_of_val(indices)) as u64
         {
             return None;
         }
@@ -191,7 +192,7 @@ impl Mesh {
             std::ptr::copy_nonoverlapping(vertices.as_ptr(), ptr as *mut V, vertices.len());
         }
         unsafe {
-            let ptr = ptr.add(vertices.len() * std::mem::size_of::<V>()) as *mut u32;
+            let ptr = ptr.add(std::mem::size_of_val(vertices)) as *mut u32;
             std::ptr::copy_nonoverlapping(indices.as_ptr(), ptr, indices.len());
         }
         drop(mapping);
@@ -203,7 +204,7 @@ impl Mesh {
                 vertex_type,
                 bounds,
                 vertex_start: (offset / std::mem::size_of::<V>()).try_into().unwrap(),
-                index_start: ((offset + std::mem::size_of::<V>() * vertices.len())
+                index_start: ((offset + std::mem::size_of_val(vertices))
                     / std::mem::size_of::<u32>())
                 .try_into()
                 .unwrap(),
@@ -213,7 +214,7 @@ impl Mesh {
                 vertex_type_size: std::mem::size_of::<V>(),
                 name,
             },
-            vertices.len() * std::mem::size_of::<V>() + indices.len() * std::mem::size_of::<u32>(),
+            std::mem::size_of_val(vertices) + std::mem::size_of_val(indices),
         ))
     }
     pub fn new_with_bounds<V: 'static>(
@@ -226,7 +227,7 @@ impl Mesh {
         name: String,
     ) -> Self {
         let size =
-            std::mem::size_of::<V>() * vertices.len() + indices.len() * std::mem::size_of::<u32>();
+            std::mem::size_of_val(vertices) + std::mem::size_of_val(indices);
         let buffer_info = vk::BufferCreateInfo::builder()
             .usage(
                 vk::BufferUsageFlags::VERTEX_BUFFER

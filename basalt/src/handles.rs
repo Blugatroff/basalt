@@ -619,7 +619,7 @@ impl CommandPool {
             inner,
             device,
             name,
-            _phantom: PhantomData::default(),
+            _phantom: PhantomData,
         }
     }
 }
@@ -663,7 +663,7 @@ impl Fence {
             inner,
             device,
             name,
-            _phantom: PhantomData::default(),
+            _phantom: PhantomData,
         }
     }
 }
@@ -703,7 +703,7 @@ impl Queue {
         Self {
             inner: queue,
             name,
-            _phantom: PhantomData::default(),
+            _phantom: PhantomData,
         }
     }
 }

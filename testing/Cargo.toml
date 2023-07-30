@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cgmath = "0.18.0"
+cgmath = { workspace = true }
+bytemuck = { workspace = true }
 basalt = { path = "../basalt/" }
-first-person-camera = { git = "https://github.com/Blugatroff/first-person-camera.git" }
 gui = { path = "../gui" }
 log = "0.4"
 pretty_env_logger = "0.4"
-puffin_egui = "0.13.0"
+puffin_egui = "0.22.0"
 
 [dependencies.sdl2]
 git = "https://github.com/Rust-SDL2/rust-sdl2"

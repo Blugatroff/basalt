@@ -7,9 +7,9 @@ use basalt::{
     PipelineDesc, PipelineHandle, PipelineLayout, RasterizationState, Renderable, Renderer,
     Sampler, ShaderModule,
 };
-use egui::FontImage;
+
 use sdl2::event::Event;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 pub use egui;
 
@@ -78,6 +78,7 @@ fn sdl2_key_to_egui_key(key: sdl2::keyboard::Keycode) -> Option<KeyOrEvent> {
 }
 
 #[repr(transparent)]
+#[derive(Copy, Clone, bytemuck::AnyBitPattern)]
 struct EguiVertex(egui::epaint::Vertex);
 
 impl basalt::Vertex for EguiVertex {
@@ -127,7 +128,7 @@ impl basalt::Vertex for EguiVertex {
 }
 
 pub struct EruptEgui {
-    ctx: egui::CtxRef,
+    ctx: egui::Context,
     raw_input: egui::RawInput,
     pipeline: PipelineHandle,
     last_meshes: Vec<(Arc<Mesh>, Arc<basalt::DescriptorSet>, cgmath::Matrix4<f32>)>,
@@ -138,9 +139,9 @@ pub struct EruptEgui {
     sampler: Arc<Sampler>,
     allocator: Arc<Allocator>,
     user_textures: slab::Slab<Arc<basalt::image::Texture>>,
+    textures: HashMap<u32, (Arc<basalt::image::Texture>, Arc<Sampler>)>,
 }
 impl EruptEgui {
-    #[allow(clippy::missing_panics_doc)]
     pub fn new(app: &mut Renderer, frames_in_flight: usize) -> Self {
         let vert_shader = ShaderModule::new(
             app.device().clone(),
@@ -235,7 +236,7 @@ impl EruptEgui {
         ));
         let user_textures = slab::Slab::new();
         Self {
-            ctx: egui::CtxRef::default(),
+            ctx: egui::Context::default(),
             raw_input: Self::default_input(),
             pipeline,
             last_meshes: Vec::new(),
@@ -246,6 +247,7 @@ impl EruptEgui {
             sampler,
             allocator: app.allocator().clone(),
             user_textures,
+            textures: HashMap::new(),
         }
     }
     fn create_buffer(allocator: Arc<Allocator>) -> buffer::Allocated {
@@ -271,6 +273,7 @@ impl EruptEgui {
     }
     fn default_input() -> egui::RawInput {
         egui::RawInput {
+            focused: true,
             //scroll_delta: egui::Vec2::new(0.0, 0.0),
             //zoom_delta: 1.0,
             screen_rect: Some(egui::Rect::from_min_max(
@@ -284,21 +287,28 @@ impl EruptEgui {
             events: Vec::new(),
             hovered_files: Vec::new(),
             dropped_files: Vec::new(),
+            max_texture_side: None,
         }
     }
     fn upload_font_texture(
         &mut self,
         image_loader: &Loader,
         descriptor_set_manager: &basalt::DescriptorSetManager,
-        texture: &egui::FontImage,
+        texture: &egui::ImageData,
     ) {
+        let texture = match texture {
+            egui::ImageData::Color(_) => {
+                log::warn!("ImageData::Color image not supported");
+                return;
+            }
+            egui::ImageData::Font(texture) => texture,
+        };
         let data = texture
-            .pixels
-            .iter()
-            .flat_map(|r| [*r; 4])
+            .srgba_pixels(None)
+            .flat_map(|p| p.to_array())
             .collect::<Vec<_>>();
-        let width = texture.width.try_into().unwrap();
-        let height = texture.height.try_into().unwrap();
+        let width = texture.width().try_into().unwrap();
+        let height = texture.height().try_into().unwrap();
         let image = basalt::image::Allocated::load(
             image_loader,
             &data,
@@ -318,7 +328,7 @@ impl EruptEgui {
         &mut self,
         renderer: &mut Renderer,
         window_size: (f32, f32),
-        f: impl FnOnce(&egui::CtxRef),
+        f: impl FnOnce(&egui::Context),
     ) {
         let (width, height) = window_size;
         self.raw_input.screen_rect = Some(egui::Rect {
@@ -329,22 +339,32 @@ impl EruptEgui {
             &mut self.raw_input,
             Self::default_input(),
         ));
-        let texture: Arc<FontImage> = self.ctx.fonts().font_image();
 
-        if texture.version != self.font_texture_version {
-            self.font_texture_version = texture.version;
+        let delta_image = self.ctx.fonts(|fonts| {
+            let delta = fonts.font_image_delta()?;
+            match delta.pos {
+                Some(_) => {
+                    log::warn!("partial texture update is not supported!");
+                    None
+                }
+                None => Some(delta.image),
+            }
+        });
+        if let Some(delta_image) = delta_image {
             self.upload_font_texture(
                 &renderer.image_loader().clone(),
                 renderer.descriptor_set_manager(),
-                &texture,
+                &delta_image,
             );
         }
+
         f(&self.ctx);
-        let (output, shapes) = self.ctx.end_frame();
-        if !output.needs_repaint {
+        let output = self.ctx.end_frame();
+        if !output.repaint_after.is_zero() {
+            // TODO: implement delayed rendering
             return;
         }
-        let clipped_meshes = self.ctx.tessellate(shapes);
+        let clipped_meshes = self.ctx.tessellate(output.shapes);
         self.last_meshes = self.draw(&clipped_meshes, renderer.allocator(), width, height);
     }
     pub fn renderables(&self) -> impl Iterator<Item = Renderable<'_>> {
@@ -361,7 +381,7 @@ impl EruptEgui {
     }
     fn draw(
         &mut self,
-        clipped_meshes: &[egui::ClippedMesh],
+        clipped_meshes: &[egui::ClippedPrimitive],
         allocator: &Arc<Allocator>,
         width: f32,
         height: f32,
@@ -373,6 +393,7 @@ impl EruptEgui {
         let font_texture = if let Some(font_texture) = self.texture.as_ref() {
             font_texture.set.clone()
         } else {
+            log::warn!("font texture not found!");
             return Vec::new();
         };
         let l = self.buffers.len();
@@ -384,65 +405,75 @@ impl EruptEgui {
         'outer: loop {
             let mut meshes = Vec::new();
             for mesh in clipped_meshes.iter() {
-                let egui::ClippedMesh(rect, mesh) = mesh;
-                let texture = match mesh.texture_id {
-                    egui::TextureId::Egui => font_texture.clone(),
-                    egui::TextureId::User(id) => self.user_textures[id as usize].set.clone(),
-                };
-                let min = cgmath::Vector3::new(rect.min.x, rect.min.y, 0.0);
-                let max = cgmath::Vector3::new(rect.max.x, rect.max.y, 0.0);
-                let sphere_bounds = *[min, max]
-                    .map(cgmath::InnerSpace::magnitude)
-                    .iter()
-                    .max_by(|a, b| a.partial_cmp(b).unwrap())
-                    .unwrap();
-                let (mesh, size) = if let Some((mesh, size)) = Mesh::new_into_buffer(
-                    unsafe {
-                        std::slice::from_raw_parts(
-                            mesh.vertices.as_ptr() as *const EguiVertex,
-                            mesh.vertices.len(),
-                        )
-                    },
-                    &mesh.indices,
-                    basalt::Bounds {
-                        max,
-                        min,
-                        sphere_bounds,
-                    },
-                    buffer.clone(),
-                    offset,
-                    String::from("EguiMesh"),
-                ) {
-                    (mesh, size)
-                } else {
-                    let buffer_info = vk::BufferCreateInfo::builder()
-                        .size(
-                            ((offset
-                                + mesh.vertices.len()
-                                    * std::mem::size_of::<egui::epaint::Vertex>()
-                                + mesh.indices.len() * std::mem::size_of::<u32>())
-                                * 2) as u64,
-                        )
-                        .usage(
-                            vk::BufferUsageFlags::VERTEX_BUFFER
-                                | vk::BufferUsageFlags::INDEX_BUFFER,
-                        );
-                    *buffer = Arc::new(buffer::Allocated::new(
-                        allocator.clone(),
-                        *buffer_info,
-                        vma::MemoryUsage::AutoPreferDevice,
-                        vk::MemoryPropertyFlags::HOST_VISIBLE,
-                        vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-                        label!("EguiVertexIndexBuffer"),
-                    ));
-                    continue 'outer;
-                };
-                offset += size;
-                offset += std::mem::size_of::<egui::epaint::Vertex>()
-                    - offset % std::mem::size_of::<egui::epaint::Vertex>();
-                assert_eq!(offset % std::mem::size_of::<egui::epaint::Vertex>(), 0);
-                let mesh = Arc::new(mesh);
-                meshes.push((mesh.clone(), texture.clone(), transform))
+                let egui::ClippedPrimitive {
+                    clip_rect,
+                    primitive,
+                } = mesh;
+                match primitive {
+                    egui::epaint::Primitive::Mesh(mesh) => {
+                        let texture = match mesh.texture_id {
+                            egui::TextureId::Managed(_) => font_texture.clone(),
+                            egui::TextureId::User(id) => {
+                                self.user_textures[id as usize].set.clone()
+                            }
+                        };
+                        let min = cgmath::Vector3::new(clip_rect.min.x, clip_rect.min.y, 0.0);
+                        let max = cgmath::Vector3::new(clip_rect.max.x, clip_rect.max.y, 0.0);
+                        let sphere_bounds = *[min, max]
+                            .map(cgmath::InnerSpace::magnitude)
+                            .iter()
+                            .max_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap();
+                        let (mesh, size) = if let Some((mesh, size)) = Mesh::new_into_buffer(
+                            unsafe {
+                                std::slice::from_raw_parts(
+                                    mesh.vertices.as_ptr() as *const EguiVertex,
+                                    mesh.vertices.len(),
+                                )
+                            },
+                            &mesh.indices,
+                            basalt::Bounds {
+                                max,
+                                min,
+                                sphere_bounds,
+                            },
+                            buffer.clone(),
+                            offset,
+                            String::from("EguiMesh"),
+                        ) {
+                            (mesh, size)
+                        } else {
+                            let buffer_info = vk::BufferCreateInfo::builder()
+                                .size(
+                                    ((offset
+                                        + mesh.vertices.len()
+                                            * std::mem::size_of::<egui::epaint::Vertex>()
+                                        + mesh.indices.len() * std::mem::size_of::<u32>())
+                                        * 2) as u64,
+                                )
+                                .usage(
+                                    vk::BufferUsageFlags::VERTEX_BUFFER
+                                        | vk::BufferUsageFlags::INDEX_BUFFER,
+                                );
+                            *buffer = Arc::new(buffer::Allocated::new(
+                                allocator.clone(),
+                                *buffer_info,
+                                vma::MemoryUsage::AutoPreferDevice,
+                                vk::MemoryPropertyFlags::HOST_VISIBLE,
+                                vma::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+                                label!("EguiVertexIndexBuffer"),
+                            ));
+                            continue 'outer;
+                        };
+                        offset += size;
+                        offset += std::mem::size_of::<egui::epaint::Vertex>()
+                            - offset % std::mem::size_of::<egui::epaint::Vertex>();
+                        assert_eq!(offset % std::mem::size_of::<egui::epaint::Vertex>(), 0);
+                        let mesh = Arc::new(mesh);
+                        meshes.push((mesh.clone(), texture.clone(), transform))
+                    }
+                    egui::epaint::Primitive::Callback(_) => todo!(),
+                }
             }
             break meshes;
         }
@@ -474,8 +505,12 @@ impl EruptEgui {
                 _ => None,
             },
             Event::KeyDown {
-                keymod, keycode, ..
+                keymod,
+                keycode,
+                repeat,
+                ..
             } => Some(egui::Event::Key {
+                repeat: *repeat,
                 key: match keycode {
                     Some(key) => match sdl2_key_to_egui_key(*key) {
                         Some(KeyOrEvent::Key(k)) => k,
@@ -488,8 +523,12 @@ impl EruptEgui {
                 modifiers: *self.update_modifiers(keymod),
             }),
             Event::KeyUp {
-                keycode, keymod, ..
+                keycode,
+                keymod,
+                repeat,
+                ..
             } => Some(egui::Event::Key {
+                repeat: *repeat,
                 key: match keycode {
                     Some(key) => match sdl2_key_to_egui_key(*key) {
                         Some(KeyOrEvent::Key(k)) => k,

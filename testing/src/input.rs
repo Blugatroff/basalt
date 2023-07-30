@@ -1,5 +1,7 @@
 use sdl2::event::Event;
 
+use crate::camera;
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Copy, Clone, Debug)]
 pub struct Input {
@@ -37,8 +39,8 @@ impl Input {
             _ => {}
         }
     }
-    pub fn make_controls(&mut self, dt: f32) -> first_person_camera::Controls {
-        let controls = first_person_camera::Controls {
+    pub fn make_controls(&mut self, dt: f32) -> camera::Controls {
+        let controls = camera::Controls {
             forwards_backwards: self.forward as i32 as f32 - self.backward as i32 as f32,
             right_left: self.right as i32 as f32 - self.left as i32 as f32,
             up_down: self.up as i32 as f32 - self.down as i32 as f32,

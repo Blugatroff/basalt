@@ -1,3 +1,4 @@
+mod camera;
 mod input;
 use basalt::puffin;
 use basalt::vk::{PipelineColorBlendAttachmentState, PipelineDepthStencilStateCreateInfo};
@@ -7,8 +8,9 @@ use basalt::{
     PipelineHandle, PipelineLayout, RasterizationState, Renderable, Renderer, ShaderModule, Vertex,
     VertexInfoDescription,
 };
+use bytemuck::AnyBitPattern;
+use camera::FirstPersonCamera;
 use cgmath::{InnerSpace, SquareMatrix};
-use first_person_camera::FirstPersonCamera;
 use gui::egui;
 use gui::EruptEgui;
 use input::Input;
@@ -350,28 +352,28 @@ impl State {
                         .allow_zoom(false)
                         .show(ui, |plot| {
                             plot.line(
-                                egui::plot::Line::new(egui::plot::Values::from_values_iter(
-                                    self.last_frame_times.iter().map(|(t, v, _, _)| {
-                                        egui::plot::Value::new(*t, *v * 1000.0)
-                                    }),
+                                egui::plot::Line::new(egui::plot::PlotPoints::from_iter(
+                                    self.last_frame_times
+                                        .iter()
+                                        .map(|(t, v, _, _)| [*t as f64, *v as f64 * 1000.0]),
                                 ))
                                 .color(egui::Color32::BLUE)
                                 .name("Frametime"),
                             );
                             plot.line(
-                                egui::plot::Line::new(egui::plot::Values::from_values_iter(
-                                    self.last_frame_times.iter().map(|(t, _, v, _)| {
-                                        egui::plot::Value::new(*t, *v * 1000.0)
-                                    }),
+                                egui::plot::Line::new(egui::plot::PlotPoints::from_iter(
+                                    self.last_frame_times
+                                        .iter()
+                                        .map(|(t, _, v, _)| [*t as f64, (*v as f64) * 1000.0]),
                                 ))
                                 .color(egui::Color32::RED)
                                 .name("GPU-Wait"),
                             );
                             plot.line(
-                                egui::plot::Line::new(egui::plot::Values::from_values_iter(
-                                    self.last_frame_times.iter().map(|(t, _, _, v)| {
-                                        egui::plot::Value::new(*t, *v * 1000.0)
-                                    }),
+                                egui::plot::Line::new(egui::plot::PlotPoints::from_iter(
+                                    self.last_frame_times
+                                        .iter()
+                                        .map(|(t, _, _, v)| [*t as f64, (*v as f64) * 1000.0]),
                                 ))
                                 .color(egui::Color32::GREEN)
                                 .name("Prerender Processing"),
@@ -580,6 +582,7 @@ fn mesh_pipeline(device: &Arc<Device>) -> MaterialLoadFn {
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Copy, AnyBitPattern)]
 struct ColorVertex {
     position: cgmath::Vector3<f32>,
     color: [u8; 4],
@@ -628,6 +631,7 @@ impl Vertex for ColorVertex {
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Copy, AnyBitPattern)]
 struct LineVertex {
     position: cgmath::Vector3<f32>,
     color: [u8; 4],
