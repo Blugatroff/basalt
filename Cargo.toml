@@ -15,6 +15,13 @@ rev = "d5e765db61cf9039cb625a789a59ddf6b6ab2337"
 git = "https://github.com/rustgd/cgmath.git"
 features = ["bytemuck"]
 
+
+[workspace.dependencies.sdl2]
+version = "0.35.2"
+git = "https://github.com/Rust-SDL2/rust-sdl2"
+rev = "e4434280048188dde43a882bb9f239118d68d947"
+features = ["raw-window-handle"]
+
 #Set the default for dependencies.
 [profile.dev.package."*"]
 opt-level = 3
